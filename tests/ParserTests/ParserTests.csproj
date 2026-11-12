@@ -22,6 +22,7 @@
     <Compile Include="../../plugin/QqClassSync/Services/AiResponseParser.cs" Link="AiResponseParser.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/AiTiaokeParser.cs" Link="AiTiaokeParser.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/TiaokeSettings.cs" Link="TiaokeSettings.cs" />
+    <Compile Include="../../plugin/QqClassSync/Services/TiaokeLog.cs" Link="TiaokeLog.cs" />
     <Compile Include="../../plugin/QqClassSync/Models/TiaokeParseResult.cs" Link="TiaokeParseResult.cs" />
     <Compile Include="../../plugin/QqClassSync/Models/LessonPatchRecord.cs" Link="LessonPatchRecord.cs" />
   </ItemGroup>

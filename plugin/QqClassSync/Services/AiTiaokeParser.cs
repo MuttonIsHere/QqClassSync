@@ -12,19 +12,28 @@ namespace QqClassSync.Services;
 ///
 /// 隐私红线（务必保持）：
 ///   - 日志**不得**打印 QQ 消息原文，也不得打印模型返回原文；
-///   - 只允许出现：「尝试调用 AI 解析」「AI 解析成功」「AI 调用失败（超时/网络错误/...）」。
+///   - 只允许出现：「尝试调用 AI 解析」「AI 解析成功」「AI 调用失败（超时/网络错误/限流/...）」。
 ///
-/// 稳定性红线：
+/// 稳定性红线和限流：
 ///   - 8 秒超时；超时 / HTTP 错误 / JSON 解析失败一律返回 null，由调用方回退正则解析；
-///   - 任何异常都在这里吞掉，绝不把异常抛进轮询循环。
+///   - 任意异常都在这里吞掉，绝不把异常抛进轮询循环；
+///   - 单实例串行（SemaphoreSlim）+ 最小调用间隔 1.5 秒，避免两个输入源同时触发把接口打爆；
+///   - 收到 HTTP 429 进入 60 秒冷却，冷却期内直接回退正则，不再发请求。
 /// </summary>
 public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokeParser> logger)
 {
     private const string Model = "deepseek-chat";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(1.5);
+    private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(60);
 
     // 复用 HttpClient，避免每次请求都建连接池（后台轮询场景下这很重要）。
     private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+
+    // 同一插件实例内串行调用 + 限流冷却（按实例隔离，测试之间互不影响）。
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private DateTime _lastCallUtc = DateTime.MinValue;
+    private DateTime _cooldownUntilUtc = DateTime.MinValue;
 
     private const string SystemPrompt = """
         你是课表指令解析器。用户会给你一条来自老师 QQ 群聊/私聊/班级通知的消息，请判断其中是否包含「调课指令」。
@@ -47,7 +56,7 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
         AiParsePolicy.IsConfigured(settings.AiEnabled, settings.AiApiKey, settings.AiBaseUrl);
 
     /// <summary>
-    /// 尝试用 AI 解析。返回 null 表示「AI 不可用 / 无调课意图 / 调用失败」，调用方应回退正则解析。
+    /// 尝试用 AI 解析。返回 null 表示「AI 不可用 / 无调课意图 / 调用失败 / 限流冷却」，调用方应回退正则解析。
     /// </summary>
     public async Task<TiaokeParseResult?> TryParseAsync(string text, CancellationToken cancellationToken)
     {
@@ -56,23 +65,45 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
             return null;
         }
 
-        logger.LogInformation("尝试调用 AI 解析");
+        if (DateTime.UtcNow < _cooldownUntilUtc)
+        {
+            TiaokeLog.Debug(logger, "AI 处于限流冷却期，本次直接走正则解析");
+            return null;
+        }
 
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(RequestTimeout);
-
+        await _gate.WaitAsync(cancellationToken);
         try
         {
-            var content = await RequestCompletionAsync(text, includeResponseFormat: true, cts.Token);
-            if (content is null)
+            var sinceLast = DateTime.UtcNow - _lastCallUtc;
+            if (sinceLast < MinInterval)
+            {
+                TiaokeLog.Debug(logger, "AI 调用过于频繁，本次直接走正则解析");
+                return null;
+            }
+
+            _lastCallUtc = DateTime.UtcNow;
+            TiaokeLog.Info(logger, "尝试调用 AI 解析");
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(RequestTimeout);
+
+            var (content, rateLimited) = await RequestCompletionAsync(text, includeResponseFormat: true, cts.Token);
+            if (content is null && !rateLimited)
             {
                 // 部分 OpenAI 兼容实现不支持 response_format，去掉该参数再试一次。
-                content = await RequestCompletionAsync(text, includeResponseFormat: false, cts.Token);
+                (content, rateLimited) = await RequestCompletionAsync(text, includeResponseFormat: false, cts.Token);
+            }
+
+            if (rateLimited)
+            {
+                _cooldownUntilUtc = DateTime.UtcNow + RateLimitCooldown;
+                TiaokeLog.Warn(logger, "AI 调用失败（限流），{Seconds} 秒内改走正则解析", (int)RateLimitCooldown.TotalSeconds);
+                return null;
             }
 
             if (content is null)
             {
-                logger.LogWarning("AI 调用失败（HTTP 错误）");
+                TiaokeLog.Warn(logger, "AI 调用失败（HTTP 错误）");
                 return null;
             }
 
@@ -81,7 +112,7 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
             {
                 if (reason != "no_intent")
                 {
-                    logger.LogWarning("AI 调用失败（返回格式无法解析）");
+                    TiaokeLog.Warn(logger, "AI 调用失败（返回格式无法解析）");
                 }
 
                 return null;
@@ -99,36 +130,43 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
                     : TiaokeCommand.Apply(outcome.Lesson, outcome.OriginalSubject, outcome.NewSubject, text))
                 .ToList();
 
-            logger.LogInformation("AI 解析成功");
+            TiaokeLog.Info(logger, "AI 解析成功");
             return TiaokeParseResult.Ok(commands);
         }
-        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            logger.LogWarning("AI 调用失败（超时）");
-            return null;
-        }
-        catch (HttpRequestException)
-        {
-            logger.LogWarning("AI 调用失败（网络错误）");
+            // 插件停止导致的外部取消，不算 AI 失败，也不打日志。
             return null;
         }
         catch (OperationCanceledException)
         {
-            // 插件停止导致的外部取消，不算 AI 失败，也不打日志。
+            TiaokeLog.Warn(logger, "AI 调用失败（超时）");
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            TiaokeLog.Warn(logger, "AI 调用失败（网络错误）");
             return null;
         }
         catch (Exception ex)
         {
             // 只打异常类型，不打消息内容，避免泄露 QQ 文本或响应体。
-            logger.LogWarning("AI 调用失败（{ErrorKind}）", ex.GetType().Name);
+            TiaokeLog.Warn(logger, ex, "AI 调用失败（{ErrorKind}）", ex.GetType().Name);
             return null;
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 
     /// <summary>
-    /// 发一次 /chat/completions，返回 message.content；HTTP 非 2xx 时返回 null。
+    /// 发一次 /chat/completions，返回 message.content；HTTP 非 2xx 时返回 (null, rateLimited)。
     /// </summary>
-    private async Task<string?> RequestCompletionAsync(string text, bool includeResponseFormat, CancellationToken cancellationToken)
+    private async Task<(string? Content, bool RateLimited)> RequestCompletionAsync(
+        string text,
+        bool includeResponseFormat,
+        CancellationToken cancellationToken)
     {
         var endpoint = $"{AiParsePolicy.NormalizeBaseUrl(settings.AiBaseUrl)}/chat/completions";
 
@@ -136,7 +174,7 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
         {
             ["model"] = Model,
             ["temperature"] = 0,
-            ["max_tokens"] = 200,
+            ["max_tokens"] = 400,
             ["messages"] = new object[]
             {
                 new { role = "system", content = SystemPrompt },
@@ -157,17 +195,23 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
         using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken);
-        if (response.StatusCode is HttpStatusCode.BadRequest && includeResponseFormat)
+
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
-            return null;
+            return (null, true);
+        }
+
+        if (response.StatusCode == HttpStatusCode.BadRequest && includeResponseFormat)
+        {
+            return (null, false);
         }
 
         if (!response.IsSuccessStatusCode)
         {
-            return null;
+            return (null, false);
         }
 
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
-        return AiResponseParser.ExtractMessageContent(body);
+        return (AiResponseParser.ExtractMessageContent(body), false);
     }
 }

@@ -92,6 +92,24 @@ internal static class AiHttpIntegrationTests
             failed += Check(server.RequestCount == 0, "空 Key → 一个请求都不发");
         }
 
+        // 5) HTTP 429 → 进入冷却，第二次调用不再发请求
+        using (var server = new MockServer(OkResponse, 429))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+
+            var first = parser.TryParseAsync("第3节换成数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(first is null, "HTTP 429 → 返回 null（回退正则）");
+
+            var second = parser.TryParseAsync("第5节换成物理", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(second is null && server.RequestCount == 1, "429 后进入冷却：第二次不再发请求");
+        }
+
         return failed;
     }
 

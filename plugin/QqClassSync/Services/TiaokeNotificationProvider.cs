@@ -67,11 +67,11 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             _loop = Task.Run(() => RunAsync(_cts.Token), CancellationToken.None);
         }
 
-        _logger.LogInformation(
+        TiaokeLog.Info(_logger, 
             "QQ 调课同步已启动（间隔 {Interval}s，关键词 {Keyword}，自动应用 {AutoApply}）",
             settings.ScanIntervalSeconds, settings.Keyword, settings.AutoApply);
-        _logger.LogInformation("今天生效的课表：{Plan}", patcher.DescribeTodayPlan());
-        _logger.LogInformation(
+        TiaokeLog.Info(_logger, "今天生效的课表：{Plan}", patcher.DescribeTodayPlan());
+        TiaokeLog.Info(_logger, 
             "AI 解析：{Status}",
             _aiParser.IsConfigured
                 ? "已配置（调用 /chat/completions，8 秒超时，失败自动回退正则）"
@@ -99,7 +99,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             return;
         }
 
-        _logger.LogInformation("QQ 调课同步正在停止…");
+        TiaokeLog.Info(_logger, "QQ 调课同步正在停止…");
         await cts.CancelAsync();
         try
         {
@@ -149,7 +149,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, "处理外部消息失败（来源：{Source}）", external.Source);
+                            TiaokeLog.Warn(_logger, ex, "处理外部消息失败（来源：{Source}）", external.Source);
                         }
                     }
                 }
@@ -175,7 +175,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                         catch (Exception ex)
                         {
                             // 单条消息处理失败不影响后续消息。
-                            _logger.LogWarning(ex, "处理 QQ Toast #{Id} 失败", toast.Id);
+                            TiaokeLog.Warn(_logger, ex, "处理 QQ Toast #{Id} 失败", toast.Id);
                         }
                     }
 
@@ -189,7 +189,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             catch (Exception ex)
             {
                 failures++;
-                _logger.LogWarning(ex, "调课同步轮询失败（连续 {Failures} 次）", failures);
+                TiaokeLog.Warn(_logger, ex, "调课同步轮询失败（连续 {Failures} 次）", failures);
             }
 
             // 连续失败时退避，避免刷屏；成功后恢复用户配置的间隔。
@@ -274,7 +274,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         var commands = parse.Commands;
-        _logger.LogInformation(
+        TiaokeLog.Info(_logger, 
             "解析到 {Count} 条指令（来源：{Parser} / {Source}）",
             commands.Count,
             fromAi ? "AI" : "正则",
@@ -346,7 +346,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         catch (Exception ex)
         {
             // 不再静默：日志写清楚，提醒也告诉用户去看日志。
-            _logger.LogWarning(ex, "执行调课失败（{Count} 条 / {Source}）", commands.Count, source);
+            TiaokeLog.Warn(_logger, ex, "执行调课失败（{Count} 条 / {Source}）", commands.Count, source);
             Show("调课失败", $"{Prefix(source)}{Describe(commands)}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
             return false;
         }

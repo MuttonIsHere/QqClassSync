@@ -49,10 +49,10 @@ public sealed class QqToastScanner(TiaokeSettings settings, ILogger<QqToastScann
 
             _accessStatus = await operation;
 
-            logger.LogInformation("通知监听权限：{Status}", _accessStatus);
+            TiaokeLog.Info(logger, "通知监听权限：{Status}", _accessStatus);
             if (_accessStatus != UserNotificationListenerAccessStatus.Allowed)
             {
-                logger.LogWarning(
+                TiaokeLog.Warn(logger, 
                     "没有通知监听权限（{Status}）。请确认 Windows 通知设置允许应用访问通知，" +
                     "并注意权限是绑定到宿主进程的。",
                     _accessStatus);
@@ -83,7 +83,7 @@ public sealed class QqToastScanner(TiaokeSettings settings, ILogger<QqToastScann
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "读取通知列表失败。");
+            TiaokeLog.Warn(logger, ex, "读取通知列表失败。");
             return [];
         }
 
@@ -116,7 +116,7 @@ public sealed class QqToastScanner(TiaokeSettings settings, ILogger<QqToastScann
                 ReadTexts(notification),
                 notification.CreationTime));
 
-            logger.LogInformation("收到 QQ Toast #{Id}: {Text}", notification.Id, fresh[^1].FullText);
+            TiaokeLog.Info(logger, "收到 QQ Toast #{Id}: {Text}", notification.Id, fresh[^1].FullText);
         }
 
         _baselineCaptured = true;
@@ -159,7 +159,7 @@ public sealed class QqToastScanner(TiaokeSettings settings, ILogger<QqToastScann
         catch (Exception ex)
         {
             // 无包身份时读 AppInfo 可能抛异常：此时无法确认来源，按隐私优先直接忽略。
-            logger.LogDebug(ex, "读取通知的应用身份失败，忽略该通知。");
+            TiaokeLog.Debug(logger, ex, "读取通知的应用身份失败，忽略该通知。");
             return false;
         }
 

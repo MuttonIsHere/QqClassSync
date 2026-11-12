@@ -16,6 +16,12 @@ public static class TiaokeBridge
     /// <summary>「小橙看班」来源标识（对方调用时传入，用于提醒里标注来源）。</summary>
     public const string SourceXiaoCheng = "小橙看班";
 
+    /// <summary>
+    /// 桥接契约版本。对方（XiaoChengLink）启动时会读取并核对；
+    /// 2 = 支持批量指令（多节 / 互换）。
+    /// </summary>
+    public static string ContractVersion => "2";
+
     /// <summary>由 <see cref="TiaokeNotificationProvider"/> 在构造时赋值。</summary>
     internal static TiaokeNotificationProvider? Provider { get; set; }
 

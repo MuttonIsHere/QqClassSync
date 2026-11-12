@@ -25,8 +25,23 @@ public sealed class TempClassPlanPatcher(
     LessonUndoJournal journal,
     ILogger<TempClassPlanPatcher> logger)
 {
+    /// <summary>
+    /// 并发保护：QQ 与小橙看班两个输入源同时来指令时，保证改课表/撤销串行执行。
+    /// 目前所有调用点都在 UI 线程（单轮询循环 + InvokeAsync），这里是廉价保险，
+    /// 防止以后新增调用路径（比如别的插件、定时任务）造成档案写冲突。
+    /// </summary>
+    private readonly object _sync = new();
+
     /// <summary>批量执行调课（Apply / Swap）。返回成功项与失败项，支持「部分成功」。</summary>
     public BatchPatchOutcome ApplyBatch(IReadOnlyList<TiaokeCommand> commands)
+    {
+        lock (_sync)
+        {
+            return ApplyBatchCore(commands);
+        }
+    }
+
+    private BatchPatchOutcome ApplyBatchCore(IReadOnlyList<TiaokeCommand> commands)
     {
         var applied = new List<string>();
         var failures = new List<string>();
@@ -58,7 +73,7 @@ public sealed class TempClassPlanPatcher(
             }
 
             plan = profile.ClassPlans[overlayId.Value];
-            logger.LogInformation("已为今天创建临时层课表：{PlanId}", overlayId);
+            TiaokeLog.Info(logger, "已为今天创建临时层课表：{PlanId}", overlayId);
         }
 
         foreach (var command in workItems)
@@ -108,7 +123,7 @@ public sealed class TempClassPlanPatcher(
                 .Select(s => s.Name)
                 .Where(n => !string.IsNullOrWhiteSpace(n))
                 .Take(12));
-            logger.LogWarning(
+            TiaokeLog.Warn(logger, 
                 "课表里找不到科目「{Subject}」，已跳过第 {Lesson} 节。可用科目：{Available}",
                 command.ToSubject,
                 command.Lesson,
@@ -200,6 +215,14 @@ public sealed class TempClassPlanPatcher(
     /// </summary>
     public BatchPatchOutcome UndoLessons(IReadOnlyList<int> lessons)
     {
+        lock (_sync)
+        {
+            return UndoLessonsCore(lessons);
+        }
+    }
+
+    private BatchPatchOutcome UndoLessonsCore(IReadOnlyList<int> lessons)
+    {
         var applied = new List<string>();
         var failures = new List<string>();
         var profile = profileService.Profile;
@@ -217,7 +240,7 @@ public sealed class TempClassPlanPatcher(
             profileService.ClearTempClassPlan();
             journal.Clear(today);
             journal.Save();
-            logger.LogInformation("已清除今天的临时层课表（撤销全部调课）");
+            TiaokeLog.Info(logger, "已清除今天的临时层课表（撤销全部调课）");
             applied.Add("已撤销今天全部调课");
             return new BatchPatchOutcome(applied, failures);
         }
@@ -254,7 +277,7 @@ public sealed class TempClassPlanPatcher(
         {
             journal.Save();
             profileService.SaveProfile();
-            logger.LogInformation("已撤销 {Count} 节的调课：{Items}", applied.Count, string.Join("；", applied));
+            TiaokeLog.Info(logger, "已撤销 {Count} 节的调课：{Items}", applied.Count, string.Join("；", applied));
         }
 
         // 所有节次都回到源课表 → 清掉临时层，避免一直挂着「（临时层）」。
