@@ -57,6 +57,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         _logger.LogInformation(
             "QQ 调课同步已启动（间隔 {Interval}s，关键词 {Keyword}，自动应用 {AutoApply}）",
             settings.ScanIntervalSeconds, settings.Keyword, settings.AutoApply);
+        _logger.LogInformation("今天生效的课表：{Plan}", patcher.DescribeTodayPlan());
     }
 
     Task IHostedService.StartAsync(CancellationToken cancellationToken)
@@ -126,7 +127,15 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                     foreach (var toast in toasts)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        HandleToast(toast);
+                        try
+                        {
+                            HandleToast(toast);
+                        }
+                        catch (Exception ex)
+                        {
+                            // 单条消息处理失败不影响后续消息。
+                            _logger.LogWarning(ex, "处理 QQ Toast #{Id} 失败", toast.Id);
+                        }
                     }
 
                     failures = 0;
@@ -178,6 +187,8 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         var command = parse.Command!;
+        _logger.LogInformation("解析到调课指令：{Command}", command);
+
         if (!_settings.AutoApply)
         {
             Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未修改课表");
@@ -189,6 +200,20 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     }
 
     private void Show(string title, string body)
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            ShowOnUiThread(title, body);
+            return;
+        }
+
+        // 整个通知请求（包括 NotificationContent）都必须在 UI 线程构建：
+        // NotificationContent.CreateTwoIconsMask 内部会 new LucideIconSource（Avalonia 对象），
+        // 在后台线程构造会抛 "Call from invalid thread"，导致通知发不出去。
+        Dispatcher.UIThread.Post(() => ShowOnUiThread(title, body));
+    }
+
+    private void ShowOnUiThread(string title, string body)
     {
         var request = new NotificationRequest
         {
@@ -211,13 +236,6 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             }
         };
 
-        if (Dispatcher.UIThread.CheckAccess())
-        {
-            ShowNotification(request);
-        }
-        else
-        {
-            Dispatcher.UIThread.Post(() => ShowNotification(request));
-        }
+        ShowNotification(request);
     }
 }

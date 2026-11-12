@@ -106,6 +106,15 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 
 - `AutoApply = false`：干跑模式，只提醒不改课表（方便先验证解析）。
 - `AllowedAppNames` / `AllowedAppIds`：通知来源白名单，联调时可加入测试应用。
+- **群聊 / 私聊 / 系统消息都能收**：插件只判断「是不是 QQ 的 Toast」和「文本里有没有关键词」，不区分聊天类型。
+
+## 已修复的两个关键 bug
+
+1. **通知在后台线程构建** → `NotificationContent.CreateTwoIconsMask` 内部会 `new LucideIconSource`（Avalonia 对象），
+   在轮询线程构造会抛 `Call from invalid thread`，导致提醒发不出去。现在整个 `NotificationRequest` 都在 UI 线程构建。
+2. **今天课表的解析方式错了** → 不能直接查 `Profile.OrderedSchedules`（正常日子那里是空的）。
+   正确做法是 `ILessonsService.GetClassPlanByDate(today, out var id)`，它按
+   「预定课表 → 临时课表 → 课表组/时间规则匹配」的顺序选出当天课表。
 
 ## 已验证 / 待验证
 

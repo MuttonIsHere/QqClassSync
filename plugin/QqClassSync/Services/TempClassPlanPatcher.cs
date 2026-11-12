@@ -8,8 +8,11 @@ namespace QqClassSync.Services;
 /// <summary>
 /// 把调课指令落到 ClassIsland 的「临时层课表」上。
 ///
-/// 实现依据（ClassIsland 源码 ProfileService.cs）：
-///   - CreateTempClassPlan 会复制源课表、标记 IsOverlay=true，并把它挂到
+/// 关键实现依据（读 ClassIsland 源码得出的结论）：
+///   - 今天该用哪张课表，不能直接查 OrderedSchedules：正常日子那里是空的，
+///     真正生效的课表由 ILessonsService.GetClassPlanByDate() 按
+///     「预定课表 → 临时课表 → 课表组/时间规则匹配」的顺序选出。
+///   - CreateTempClassPlan 会复制源课表、标记 IsOverlay=true，并挂到
 ///     OrderedSchedules[今天]，所以补丁只影响今天。
 ///   - ClassPlan.Classes 与时间表里 TimeType==0 的「上课」时间点一一对应，
 ///     因此「第 X 节」就是 Classes[X-1]。
@@ -17,6 +20,7 @@ namespace QqClassSync.Services;
 /// </summary>
 public sealed class TempClassPlanPatcher(
     IProfileService profileService,
+    ILessonsService lessonsService,
     IExactTimeService timeService,
     ILogger<TempClassPlanPatcher> logger)
 {
@@ -25,26 +29,22 @@ public sealed class TempClassPlanPatcher(
         var profile = profileService.Profile;
         var today = timeService.GetCurrentLocalDateTime().Date;
 
-        if (!profile.OrderedSchedules.TryGetValue(today, out var orderedSchedule)
-            || orderedSchedule.ClassPlanId == Guid.Empty
-            || !profile.ClassPlans.ContainsKey(orderedSchedule.ClassPlanId))
+        var plan = lessonsService.GetClassPlanByDate(today, out var planId);
+        if (plan is null || planId is null)
         {
             return PatchOutcome.Fail("今天没有生效的课表，无法调课");
         }
 
-        var planId = orderedSchedule.ClassPlanId;
-        var plan = profile.ClassPlans[planId];
-
         if (!plan.IsOverlay)
         {
-            var overlayId = profileService.CreateTempClassPlan(planId);
+            var overlayId = profileService.CreateTempClassPlan(planId.Value);
             if (overlayId is null)
             {
                 return PatchOutcome.Fail("创建临时层课表失败（可能今天已经有临时层）");
             }
 
-            planId = overlayId.Value;
-            plan = profile.ClassPlans[planId];
+            planId = overlayId;
+            plan = profile.ClassPlans[planId.Value];
             logger.LogInformation("已为今天创建临时层课表：{PlanId}", planId);
         }
 
@@ -77,6 +77,21 @@ public sealed class TempClassPlanPatcher(
             command.Lesson, beforeName, target.Value.Value.Name);
 
         return PatchOutcome.Ok($"第 {command.Lesson} 节：{beforeName} → {target.Value.Value.Name}");
+    }
+
+    /// <summary>
+    /// 诊断用：描述今天解析出来的课表，便于确认「今天没有课表」这类问题。
+    /// </summary>
+    public string DescribeTodayPlan()
+    {
+        var today = timeService.GetCurrentLocalDateTime().Date;
+        var plan = lessonsService.GetClassPlanByDate(today, out _);
+        if (plan is null)
+        {
+            return "无（今天没有生效的课表）";
+        }
+
+        return $"「{plan.Name}」共 {plan.Classes.Count} 节{(plan.IsOverlay ? "（临时层）" : string.Empty)}";
     }
 
     private static KeyValuePair<Guid, Subject>? FindSubject(Profile profile, string name)
