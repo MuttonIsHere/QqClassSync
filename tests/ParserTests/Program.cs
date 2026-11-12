@@ -33,6 +33,12 @@ internal static class Program
         CheckMentions(parser, "李云芳 #撤销调课", true);
         CheckMentions(parser, "李云芳 今天作业好多", false);
 
+        Console.WriteLine();
+        Console.WriteLine("=== 调课改动日志 ===");
+        var journalFailures = JournalTests.Run();
+        _failed += journalFailures;
+
+        Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "全部用例通过" : $"有 {_failed} 个用例失败");
         return _failed == 0 ? 0 : 1;
     }

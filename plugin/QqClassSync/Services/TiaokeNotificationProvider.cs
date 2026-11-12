@@ -196,7 +196,11 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         var isUndo = command.Kind == TiaokeCommandKind.Undo;
-        var outcome = isUndo ? _patcher.Undo() : _patcher.Apply(command);
+        var outcome = isUndo
+            ? command.Lesson > 0
+                ? _patcher.UndoLesson(command.Lesson)
+                : _patcher.Undo()
+            : _patcher.Apply(command);
 
         var title = (isUndo, outcome.Applied) switch
         {
