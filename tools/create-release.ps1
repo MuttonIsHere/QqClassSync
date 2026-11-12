@@ -1,4 +1,4 @@
-# create-release.ps1 —— 用 GitHub REST API 创建 Release 并上传插件包（git push 不通时的备用通道）
+﻿# create-release.ps1 —— 用 GitHub REST API 创建 Release 并上传插件包（git push 不通时的备用通道）
 #
 # 用法：
 #   .\create-release.ps1 -Tag v1.0.0 -Name "v1.0.0" -Asset "..\plugin\QqClassSync\cipx\QqClassSync.cipx"

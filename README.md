@@ -1,8 +1,23 @@
 # QQ 调课同步（QqClassSync）
 
-监听 QQ 群聊里的调课消息，自动给 ClassIsland 打「临时层课表补丁」，并在大屏弹出提醒。
+[![Release](https://img.shields.io/github/v/release/MuttonIsHere/QqClassSync?label=release)](https://github.com/MuttonIsHere/QqClassSync/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](https://github.com/MuttonIsHere/QqClassSync)
+[![ClassIsland](https://img.shields.io/badge/ClassIsland-2.1.0.1-4B8BBE)](https://github.com/ClassIsland/ClassIsland)
+
+监听 QQ 群聊 / 私聊里的「#调课」消息，自动给 ClassIsland 的**临时层课表**打补丁，并在大屏弹出提醒。
 
 > 与「小橙看班」项目完全独立。本目录是独立新项目。
+
+## 截图
+
+设置页（监听 / 触发关键词 / 轮询间隔 / 行为开关）：
+
+![设置页](docs/images/settings-page.png)
+
+调课操作区（今日生效课表 + 一键撤销）：
+
+![调课操作](docs/images/settings-page-actions.png)
+
 
 ## 目录结构
 
@@ -118,15 +133,28 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 
 ## 已验证 / 待验证
 
-已验证（含日志证据）：
+已验证（真机 + 日志证据）：
 
-- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,0.1.0.0)`
+- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,1.0.0.0)`
 - 提醒提供方注册：`注册提醒提供方：b7f3c1a2-...（QQ 调课同步）`
 - 后台启动 + 权限：`QQ 调课同步已启动（间隔 1s…）`、`通知监听权限：Allowed`
 - 探针在真实 QQ 群消息上抓到 Toast（群名 + 发送者：内容）
+- **真实私聊 `#调课 第3节 语文改数学` → 大屏弹「调课已同步」+ 课表即时变更**
+- 设置页打开无绑定错误；「撤销今天的调课」按钮恢复原课表
 
-待验证：一条真实包含 `#调课` 的 QQ 消息 → 临时层课表被改写 + 大屏提醒。
-（测试用的假 Toast 需要给进程注册 AUMID；本机 shell 的 AUMID 缓存需重新登录才刷新，未能自动发出。）
+## 使用方法
+
+在 QQ 里（群聊或私聊都行）发：
+
+```
+#调课 第3节 语文改数学
+#调课 第五节 化学换成生物
+#撤销调课
+```
+
+- 支持中文数字与 `改 / 改成 / 换成 / 改为 / 换为` 等写法
+- 撤销是**整天级别**（`ClearTempClassPlan()` 只能整天清），也可以在设置页点按钮
+- QQ 窗口在前台时通常不弹 Toast，测试时建议从手机发送
 
 ## 已知限制
 
