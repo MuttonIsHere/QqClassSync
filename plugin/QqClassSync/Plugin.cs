@@ -4,6 +4,7 @@ using ClassIsland.Core.Extensions.Registry;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using QqClassSync.Services;
+using QqClassSync.Views;
 
 namespace QqClassSync;
 
@@ -20,5 +21,6 @@ public class Plugin : PluginBase
         services.AddSingleton<QqToastScanner>();
         services.AddSingleton<TempClassPlanPatcher>();
         services.AddNotificationProvider<TiaokeNotificationProvider>();
+        services.AddSettingsPage<TiaokeSettingsPage>();
     }
 }

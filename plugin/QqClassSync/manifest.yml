@@ -4,5 +4,5 @@ description: 监听 QQ 群聊里的「#调课」消息，自动打临时课表�
 entranceAssembly: "QqClassSync.dll"
 url: "https://github.com/ClassIsland/ClassIsland"
 apiVersion: 2.0.0.0
-version: 0.1.0.0
+version: 1.0.0.0
 author: 大肥鱼

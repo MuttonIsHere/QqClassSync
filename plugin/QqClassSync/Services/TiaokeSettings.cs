@@ -1,14 +1,17 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace QqClassSync.Services;
 
 /// <summary>
-/// 插件设置。存放在 ClassIsland 的插件配置目录（PluginConfigFolder/Settings.json），
-/// 用户可以直接编辑文本文件。后续要做设置页时，把这里换成 PluginSettings 基类即可。
+/// 插件设置。存放在 ClassIsland 的插件配置目录（PluginConfigFolder/Settings.json）。
+///
+/// 继承 ObservableObject 是为了让设置页可以直接绑定；文件被外部修改时，
+/// 轮询循环会调用 <see cref="ReloadIfChanged"/> 热重载。
 /// </summary>
-public sealed class TiaokeSettings
+public partial class TiaokeSettings : ObservableObject
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -18,32 +21,38 @@ public sealed class TiaokeSettings
     };
 
     /// <summary>是否启用监听。</summary>
-    public bool Enabled { get; set; } = true;
+    [ObservableProperty]
+    private bool _enabled = true;
 
     /// <summary>触发关键词。</summary>
-    public string Keyword { get; set; } = "#调课";
+    [ObservableProperty]
+    private string _keyword = "#调课";
 
     /// <summary>轮询间隔（秒）。Windows 通知中心只提供轮询方式。</summary>
-    public double ScanIntervalSeconds { get; set; } = 1.0;
+    [ObservableProperty]
+    private double _scanIntervalSeconds = 1.0;
 
     /// <summary>
     /// true：解析成功后直接改课表；false：只发提醒、不改课表（干跑模式，方便先验证解析）。
     /// </summary>
-    public bool AutoApply { get; set; } = true;
+    [ObservableProperty]
+    private bool _autoApply = true;
 
     /// <summary>解析失败时是否也提醒（方便老师调整消息格式）。</summary>
-    public bool NotifyOnParseFailure { get; set; } = true;
+    [ObservableProperty]
+    private bool _notifyOnParseFailure = true;
 
     /// <summary>
-    /// 认可的通知来源显示名（默认 NT QQ / TIM）。留空表示不按名称判断。
-    /// 联调时可以把测试用的应用名加进来。
+    /// 认可的通知来源显示名（默认 NT QQ / TIM）。联调时可以把测试用的应用名加进来。
     /// </summary>
-    public string[] AllowedAppNames { get; set; } = ["QQ", "腾讯QQ", "TIM"];
+    [ObservableProperty]
+    private string[] _allowedAppNames = ["QQ", "腾讯QQ", "TIM"];
 
     /// <summary>
-    /// 认可的通知 AppUserModelId。联调时可以把「Windows PowerShell」的 AUMID 加进来做端到端测试。
+    /// 认可的通知 AppUserModelId。联调时可以把测试应用的 AUMID 加进来。
     /// </summary>
-    public string[] AllowedAppIds { get; set; } =
+    [ObservableProperty]
+    private string[] _allowedAppIds =
         ["Tencent.QQNT", "com.tencent.qq", "com.tencent.tim", "QQ"];
 
     [JsonIgnore]
@@ -51,6 +60,19 @@ public sealed class TiaokeSettings
 
     [JsonIgnore]
     private DateTime _lastLoadedWriteTimeUtc = DateTime.MinValue;
+
+    [JsonIgnore]
+    public string ScanIntervalDisplay
+    {
+        get => ScanIntervalSeconds.ToString("0.##");
+        set
+        {
+            if (double.TryParse(value, out var parsed))
+            {
+                ScanIntervalSeconds = parsed;
+            }
+        }
+    }
 
     public static TiaokeSettings Load(string configFolder)
     {
@@ -60,8 +82,7 @@ public sealed class TiaokeSettings
         {
             if (File.Exists(path))
             {
-                var json = File.ReadAllText(path);
-                var loaded = JsonSerializer.Deserialize<TiaokeSettings>(json, JsonOptions);
+                var loaded = JsonSerializer.Deserialize<TiaokeSettings>(File.ReadAllText(path), JsonOptions);
                 if (loaded is not null)
                 {
                     settings = loaded;
@@ -81,7 +102,7 @@ public sealed class TiaokeSettings
     }
 
     /// <summary>
-    /// 设置文件被外部修改后自动重载（轮询循环里调用），这样联调时改 Settings.json 不用重启 ClassIsland。
+    /// 设置文件被外部修改后自动重载（轮询循环里调用），改 Settings.json 不用重启 ClassIsland。
     /// </summary>
     public void ReloadIfChanged()
     {
@@ -116,6 +137,8 @@ public sealed class TiaokeSettings
 
     private void CopyFrom(TiaokeSettings other)
     {
+        // ObservableObject 生成属性的 setter 会做相等判断，值没变就不会触发 PropertyChanged，
+        // 因此这里不会和设置页的「自动保存」形成回环。
         Enabled = other.Enabled;
         Keyword = other.Keyword;
         ScanIntervalSeconds = other.ScanIntervalSeconds;

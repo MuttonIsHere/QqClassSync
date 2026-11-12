@@ -80,6 +80,23 @@ public sealed class TempClassPlanPatcher(
     }
 
     /// <summary>
+    /// 撤销调课：清除今天的临时层课表，恢复到原课表。
+    /// 注意 ClearTempClassPlan() 是「整天」级别的撤销，不能只撤销某一节。
+    /// </summary>
+    public PatchOutcome Undo()
+    {
+        var profile = profileService.Profile;
+        if (profile.OverlayClassPlanId is null)
+        {
+            return PatchOutcome.Fail("今天没有临时层课表，无需撤销");
+        }
+
+        profileService.ClearTempClassPlan();
+        logger.LogInformation("已清除今天的临时层课表（撤销调课）");
+        return PatchOutcome.Ok("已恢复原课表（今天的临时层已清除）");
+    }
+
+    /// <summary>
     /// 诊断用：描述今天解析出来的课表，便于确认「今天没有课表」这类问题。
     /// </summary>
     public string DescribeTodayPlan()

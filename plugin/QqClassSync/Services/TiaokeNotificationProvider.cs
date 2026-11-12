@@ -154,7 +154,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             // 连续失败时退避，避免刷屏；成功后恢复用户配置的间隔。
             var delay = failures > 0
                 ? TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(failures, 5)))
-                : TimeSpan.FromSeconds(_settings.ScanIntervalSeconds);
+                : TimeSpan.FromSeconds(Math.Clamp(_settings.ScanIntervalSeconds, 0.3, 10));
 
             try
             {
@@ -170,7 +170,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private void HandleToast(ToastSnapshot toast)
     {
         var text = toast.FullText;
-        if (!text.Contains(_settings.Keyword, StringComparison.Ordinal))
+        if (!_parser.MentionsCommand(text, _settings.Keyword))
         {
             return;
         }
@@ -187,16 +187,26 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         var command = parse.Command!;
-        _logger.LogInformation("解析到调课指令：{Command}", command);
+        _logger.LogInformation("解析到指令：{Command}", command);
 
         if (!_settings.AutoApply)
         {
-            Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未修改课表");
+            Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未执行");
             return;
         }
 
-        var outcome = _patcher.Apply(command);
-        Show(outcome.Applied ? "调课已同步" : "调课失败", $"{command}：{outcome.Message}");
+        var isUndo = command.Kind == TiaokeCommandKind.Undo;
+        var outcome = isUndo ? _patcher.Undo() : _patcher.Apply(command);
+
+        var title = (isUndo, outcome.Applied) switch
+        {
+            (true, true) => "调课已撤销",
+            (true, false) => "撤销失败",
+            (false, true) => "调课已同步",
+            _ => "调课失败"
+        };
+
+        Show(title, $"{command}：{outcome.Message}");
     }
 
     private void Show(string title, string body)
