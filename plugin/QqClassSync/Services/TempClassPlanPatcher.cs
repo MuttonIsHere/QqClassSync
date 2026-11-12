@@ -9,18 +9,14 @@ namespace QqClassSync.Services;
 /// 把调课指令落到 ClassIsland 的「临时层课表」上。
 ///
 /// 关键实现依据（读 ClassIsland 源码得出）：
-///   - 今天该用哪张课表，不能直接查 OrderedSchedules：正常日子那里是空的，
-///     真正生效的课表由 ILessonsService.GetClassPlanByDate() 按
-///     「预定课表 → 临时课表 → 课表组/时间规则匹配」的顺序选出。
-///   - CreateTempClassPlan 会复制源课表、标记 IsOverlay=true，并挂到
-///     OrderedSchedules[今天]，所以补丁只影响今天。
-///   - ClassPlan.Classes 与时间表里 TimeType==0 的「上课」时间点一一对应，
-///     因此「第 X 节」就是 Classes[X-1]。
-///   - 改完必须 SaveProfile()，否则只在内存里生效。
+///   - 今天该用哪张课表由 ILessonsService.GetClassPlanByDate() 选出
+///     （预定课表 → 临时课表 → 课表组/时间规则匹配）。
+///   - CreateTempClassPlan 会复制源课表并挂到 OrderedSchedules[今天]，补丁只影响今天。
+///   - ClassPlan.Classes 与 TimeType==0 的时间点一一对应，第 X 节 = Classes[X-1]。
+///   - 批量调课：全部改完后只 SaveProfile() 一次，避免连续落盘。
+///   - 调用方必须保证在 UI 线程执行（否则会触发课表网格的跨线程异常）。
 ///
-/// 单节课撤销：临时层本身看不出「哪些节被改过」，所以每次改课都往
-/// <see cref="LessonUndoJournal"/> 记一条「第几节 原科目→新科目」，
-/// 撤销时只回滚指定节次，其余改动保留。
+/// 单节课撤销依赖 <see cref="LessonUndoJournal"/> 记录「第几节 原科目→新科目」。
 /// </summary>
 public sealed class TempClassPlanPatcher(
     IProfileService profileService,
@@ -29,16 +25,27 @@ public sealed class TempClassPlanPatcher(
     LessonUndoJournal journal,
     ILogger<TempClassPlanPatcher> logger)
 {
-    public PatchOutcome Apply(TiaokeCommand command)
+    /// <summary>批量执行调课（Apply / Swap）。返回成功项与失败项，支持「部分成功」。</summary>
+    public BatchPatchOutcome ApplyBatch(IReadOnlyList<TiaokeCommand> commands)
     {
+        var applied = new List<string>();
+        var failures = new List<string>();
+
         var profile = profileService.Profile;
         var today = timeService.GetCurrentLocalDateTime().Date;
+
+        var workItems = commands.Where(c => c.Kind is TiaokeCommandKind.Apply or TiaokeCommandKind.Swap).ToList();
+        if (workItems.Count == 0)
+        {
+            failures.Add("没有可执行的调课指令");
+            return new BatchPatchOutcome(applied, failures);
+        }
 
         var plan = lessonsService.GetClassPlanByDate(today, out var planId);
         if (plan is null || planId is null)
         {
-            logger.LogWarning("今天没有生效的课表，无法调课。");
-            return PatchOutcome.Fail("今天没有生效的课表，无法调课");
+            failures.Add("今天没有生效的课表");
+            return new BatchPatchOutcome(applied, failures);
         }
 
         if (!plan.IsOverlay)
@@ -46,19 +53,47 @@ public sealed class TempClassPlanPatcher(
             var overlayId = profileService.CreateTempClassPlan(planId.Value);
             if (overlayId is null)
             {
-                logger.LogWarning("创建临时层课表失败（今天可能已有临时层），源课表 ID={PlanId}", planId);
-                return PatchOutcome.Fail("创建临时层课表失败（可能今天已经有临时层）");
+                failures.Add("创建临时层课表失败（今天可能已有临时层）");
+                return new BatchPatchOutcome(applied, failures);
             }
 
-            planId = overlayId;
-            plan = profile.ClassPlans[planId.Value];
-            logger.LogInformation("已为今天创建临时层课表：{PlanId}", planId);
+            plan = profile.ClassPlans[overlayId.Value];
+            logger.LogInformation("已为今天创建临时层课表：{PlanId}", overlayId);
         }
 
-        if (command.Lesson > plan.Classes.Count)
+        foreach (var command in workItems)
         {
-            logger.LogWarning("第 {Lesson} 节超出今天课表范围（共 {Count} 节）", command.Lesson, plan.Classes.Count);
-            return PatchOutcome.Fail($"第 {command.Lesson} 节超出今天课表范围（共 {plan.Classes.Count} 节）");
+            if (command.Kind == TiaokeCommandKind.Swap)
+            {
+                ApplySwap(profile, plan, command, applied, failures);
+            }
+            else
+            {
+                ApplySingle(profile, plan, command, applied, failures);
+            }
+        }
+
+        if (applied.Count > 0)
+        {
+            // 批量只落盘一次。
+            profileService.SaveProfile();
+            journal.Save();
+        }
+
+        return new BatchPatchOutcome(applied, failures);
+    }
+
+    private void ApplySingle(
+        Profile profile,
+        ClassPlan plan,
+        TiaokeCommand command,
+        List<string> applied,
+        List<string> failures)
+    {
+        if (command.Lesson < 1 || command.Lesson > plan.Classes.Count)
+        {
+            failures.Add($"第{command.Lesson}节超出今天课表范围（共 {plan.Classes.Count} 节）");
+            return;
         }
 
         var classInfo = plan.Classes[command.Lesson - 1];
@@ -74,115 +109,192 @@ public sealed class TempClassPlanPatcher(
                 .Where(n => !string.IsNullOrWhiteSpace(n))
                 .Take(12));
             logger.LogWarning(
-                "课表里找不到科目「{Subject}」，无法调课。可用科目：{Available}",
+                "课表里找不到科目「{Subject}」，已跳过第 {Lesson} 节。可用科目：{Available}",
                 command.ToSubject,
+                command.Lesson,
                 available);
-            return PatchOutcome.Fail($"课表里找不到科目「{command.ToSubject}」。可用科目：{available}");
+            failures.Add($"第{command.Lesson}节找不到科目「{command.ToSubject}」，已跳过");
+            return;
         }
 
         if (classInfo.SubjectId == target.Value.Key)
         {
-            return PatchOutcome.Ok($"第 {command.Lesson} 节本来就是 {target.Value.Value.Name}，无需改动");
+            applied.Add($"第{command.Lesson}节本来就是{target.Value.Value.Name}（未变更）");
+            return;
         }
 
-        // 先记日志再改：万一 SaveProfile 抛异常，日志里有一条无害的「未生效」记录，
-        // 下次撤销会把它写回成同一个科目，不会造成数据错乱。
         journal.Add(new LessonPatchRecord(
-            today,
+            timeService.GetCurrentLocalDateTime().Date,
             command.Lesson,
             classInfo.SubjectId,
             beforeName,
             target.Value.Key,
             target.Value.Value.Name,
             DateTime.Now));
-        journal.Save();
 
         classInfo.SubjectId = target.Value.Key;
         classInfo.IsChangedClass = true;
-        profileService.SaveProfile();
+        applied.Add($"第{command.Lesson}节 {beforeName}→{target.Value.Value.Name}");
+    }
 
-        logger.LogInformation(
-            "调课已写入临时层：第{Lesson}节 {Before} -> {After}",
-            command.Lesson, beforeName, target.Value.Value.Name);
+    private void ApplySwap(
+        Profile profile,
+        ClassPlan plan,
+        TiaokeCommand command,
+        List<string> applied,
+        List<string> failures)
+    {
+        var a = command.Lesson;
+        var b = command.SwapWith;
+        if (a == b)
+        {
+            failures.Add($"第{a}节不能和自己互换");
+            return;
+        }
 
-        return PatchOutcome.Ok($"第 {command.Lesson} 节：{beforeName} → {target.Value.Value.Name}");
+        if (a < 1 || a > plan.Classes.Count || b < 1 || b > plan.Classes.Count)
+        {
+            failures.Add($"互换节次超出今天课表范围（第{a}节 / 第{b}节，共 {plan.Classes.Count} 节）");
+            return;
+        }
+
+        var classA = plan.Classes[a - 1];
+        var classB = plan.Classes[b - 1];
+        var subjectA = classA.SubjectId;
+        var subjectB = classB.SubjectId;
+        if (subjectA == subjectB)
+        {
+            failures.Add($"第{a}节和第{b}节科目相同，无需互换");
+            return;
+        }
+
+        var nameA = profile.Subjects.TryGetValue(subjectA, out var sa) ? sa.Name : "(空)";
+        var nameB = profile.Subjects.TryGetValue(subjectB, out var sb) ? sb.Name : "(空)";
+        var today = timeService.GetCurrentLocalDateTime().Date;
+
+        journal.Add(new LessonPatchRecord(today, a, subjectA, nameA, subjectB, nameB, DateTime.Now));
+        journal.Add(new LessonPatchRecord(today, b, subjectB, nameB, subjectA, nameA, DateTime.Now));
+
+        classA.SubjectId = subjectB;
+        classB.SubjectId = subjectA;
+        classA.IsChangedClass = true;
+        classB.IsChangedClass = true;
+
+        applied.Add($"第{a}节↔第{b}节 互换（{nameA}↔{nameB}）");
+    }
+
+    /// <summary>单条执行（保留给设置页等旧调用方）。</summary>
+    public PatchOutcome Apply(TiaokeCommand command)
+    {
+        var batch = ApplyBatch([command]);
+        if (batch.Applied.Count > 0)
+        {
+            return PatchOutcome.Ok(batch.Applied[0]);
+        }
+
+        return PatchOutcome.Fail(batch.Failures.FirstOrDefault() ?? "调课失败");
     }
 
     /// <summary>
-    /// 撤销单节课：只把指定节次恢复成原科目，其他节次的调课保留。
+    /// 批量撤销：lessons 为空表示撤销今天全部；否则只恢复指定节次，其他调课保留。
     /// </summary>
-    public PatchOutcome UndoLesson(int lesson)
+    public BatchPatchOutcome UndoLessons(IReadOnlyList<int> lessons)
     {
+        var applied = new List<string>();
+        var failures = new List<string>();
         var profile = profileService.Profile;
         var today = timeService.GetCurrentLocalDateTime().Date;
 
         if (profile.OverlayClassPlanId is null
             || !profile.ClassPlans.TryGetValue(profile.OverlayClassPlanId.Value, out var plan))
         {
-            return PatchOutcome.Fail("今天没有临时层课表，无需撤销");
+            failures.Add("今天没有临时层课表，无需撤销");
+            return new BatchPatchOutcome(applied, failures);
         }
 
-        if (lesson <= 0 || lesson > plan.Classes.Count)
-        {
-            return PatchOutcome.Fail($"节次 {lesson} 超出今天课表范围（共 {plan.Classes.Count} 节）");
-        }
-
-        var record = journal.TakeLast(today, lesson);
-        var fallbackId = Guid.Empty;
-        var fallbackName = string.Empty;
-        if (record is null && !TryReadOriginalFromSource(profile, plan, lesson, out fallbackId, out fallbackName))
-        {
-            return PatchOutcome.Fail($"找不到第 {lesson} 节的原课表信息，无法精准撤销（可改用整天撤销）");
-        }
-
-        var originalId = record?.OriginalSubjectId ?? fallbackId;
-        var originalName = record?.OriginalSubjectName ?? fallbackName;
-
-        var classInfo = plan.Classes[lesson - 1];
-        classInfo.SubjectId = originalId;
-        classInfo.IsChangedClass = false;
-
-        journal.Save();
-        profileService.SaveProfile();
-
-        logger.LogInformation("已撤销第{Lesson}节的调课，恢复为 {Subject}", lesson, originalName);
-
-        // 所有节次都和源课表一致了，就把临时层一起清掉，避免课表名一直挂着「（临时层）」。
-        if (IsIdenticalToSource(profile, plan))
+        if (lessons.Count == 0)
         {
             profileService.ClearTempClassPlan();
             journal.Clear(today);
             journal.Save();
-            logger.LogInformation("所有调课都已撤销，临时层课表已清除。");
-            return PatchOutcome.Ok($"第 {lesson} 节已恢复为 {originalName}；今天已无调课，临时层已清除");
+            logger.LogInformation("已清除今天的临时层课表（撤销全部调课）");
+            applied.Add("已撤销今天全部调课");
+            return new BatchPatchOutcome(applied, failures);
         }
 
-        return PatchOutcome.Ok($"第 {lesson} 节已恢复为 {originalName}，其余调课保留");
+        foreach (var lesson in lessons.Distinct().OrderBy(x => x))
+        {
+            if (lesson < 1 || lesson > plan.Classes.Count)
+            {
+                failures.Add($"第{lesson}节超出今天课表范围（共 {plan.Classes.Count} 节）");
+                continue;
+            }
+
+            var record = journal.TakeLast(today, lesson);
+            var originalId = Guid.Empty;
+            var originalName = string.Empty;
+            if (record is not null)
+            {
+                originalId = record.OriginalSubjectId;
+                originalName = record.OriginalSubjectName;
+            }
+            else if (!TryReadOriginalFromSource(profile, plan, lesson, out originalId, out originalName))
+            {
+                failures.Add($"第{lesson}节找不到原课表信息，无法撤销");
+                continue;
+            }
+
+            var classInfo = plan.Classes[lesson - 1];
+            classInfo.SubjectId = originalId;
+            classInfo.IsChangedClass = false;
+            applied.Add($"第{lesson}节→{originalName}");
+        }
+
+        if (applied.Count > 0)
+        {
+            journal.Save();
+            profileService.SaveProfile();
+            logger.LogInformation("已撤销 {Count} 节的调课：{Items}", applied.Count, string.Join("；", applied));
+        }
+
+        // 所有节次都回到源课表 → 清掉临时层，避免一直挂着「（临时层）」。
+        if (applied.Count > 0 && IsIdenticalToSource(profile, plan))
+        {
+            profileService.ClearTempClassPlan();
+            journal.Clear(today);
+            journal.Save();
+            applied.Add("（已无调课，临时层已清除）");
+        }
+
+        return new BatchPatchOutcome(applied, failures);
     }
 
-    /// <summary>
-    /// 撤销整天：清除今天的临时层课表，恢复到原课表。
-    /// </summary>
+    /// <summary>撤销单节课（保留给设置页）。</summary>
+    public PatchOutcome UndoLesson(int lesson)
+    {
+        var batch = UndoLessons([lesson]);
+        if (batch.Applied.Count > 0)
+        {
+            var extra = batch.Applied.Count > 1 ? "；" + string.Join("；", batch.Applied.Skip(1)) : string.Empty;
+            return PatchOutcome.Ok(batch.Applied[0] + extra);
+        }
+
+        return PatchOutcome.Fail(batch.Failures.FirstOrDefault() ?? "撤销失败");
+    }
+
+    /// <summary>撤销整天（保留给设置页）。</summary>
     public PatchOutcome Undo()
     {
-        var profile = profileService.Profile;
-        if (profile.OverlayClassPlanId is null)
+        var batch = UndoLessons([]);
+        if (batch.Applied.Count > 0)
         {
-            return PatchOutcome.Fail("今天没有临时层课表，无需撤销");
+            return PatchOutcome.Ok(batch.Applied[0]);
         }
 
-        var today = timeService.GetCurrentLocalDateTime().Date;
-        profileService.ClearTempClassPlan();
-        journal.Clear(today);
-        journal.Save();
-
-        logger.LogInformation("已清除今天的临时层课表（撤销全部调课）");
-        return PatchOutcome.Ok("已恢复原课表（今天的临时层已清除）");
+        return PatchOutcome.Fail(batch.Failures.FirstOrDefault() ?? "撤销失败");
     }
 
-    /// <summary>
-    /// 诊断用：描述今天解析出来的课表，便于确认「今天没有课表」这类问题。
-    /// </summary>
+    /// <summary>诊断用：描述今天解析出来的课表。</summary>
     public string DescribeTodayPlan()
     {
         var today = timeService.GetCurrentLocalDateTime().Date;
@@ -200,9 +312,6 @@ public sealed class TempClassPlanPatcher(
         return $"「{plan.Name}」共 {plan.Classes.Count} 节{suffix}";
     }
 
-    /// <summary>
-    /// 没有日志记录时（例如日志被清空、插件重装），退回到「临时层的源课表」读取原科目。
-    /// </summary>
     private static bool TryReadOriginalFromSource(
         Profile profile,
         ClassPlan overlayPlan,
@@ -231,7 +340,6 @@ public sealed class TempClassPlanPatcher(
             || !profile.ClassPlans.TryGetValue(sourceId, out var sourcePlan)
             || overlayPlan.Classes.Count != sourcePlan.Classes.Count)
         {
-            // 无法比较时保守保留临时层。
             return false;
         }
 

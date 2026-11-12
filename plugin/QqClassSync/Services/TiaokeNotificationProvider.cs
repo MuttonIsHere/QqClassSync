@@ -36,7 +36,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private bool _warnedAboutAccess;
-    private TiaokeCommand? _pendingAiCommand;
+    private IReadOnlyList<TiaokeCommand>? _pendingCommands;
     private DateTime _pendingExpiresAt;
     private string _pendingSource = "QQ";
 
@@ -229,9 +229,9 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
 
         if (TiaokeParser.IsDropText(text))
         {
-            if (_pendingAiCommand is not null)
+            if (_pendingCommands is not null)
             {
-                _pendingAiCommand = null;
+                _pendingCommands = null;
                 Show("调课待确认", $"{Prefix(source)}已放弃待确认的 AI 调课");
             }
 
@@ -273,32 +273,38 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             return;
         }
 
-        var command = parse.Command!;
+        var commands = parse.Commands;
         _logger.LogInformation(
-            "解析到指令：{Command}（来源：{Parser} / {Source}）",
-            command,
+            "解析到 {Count} 条指令（来源：{Parser} / {Source}）",
+            commands.Count,
             fromAi ? "AI" : "正则",
             source);
 
         if (!_settings.AutoApply)
         {
-            Show("调课（预览）", $"{Prefix(source)}解析到 {command}，当前为干跑模式，未执行");
+            Show("调课（预览）", $"{Prefix(source)}解析到：{Describe(commands)}，当前为干跑模式，未执行");
             return;
         }
 
         // AI 解析的结果默认要先确认（防误判/防把闲聊当调课）：先挂起，等老师发「#确认」再由下面应用。
         if (fromAi && _settings.AiConfirmBeforeSend)
         {
-            _pendingAiCommand = command;
+            _pendingCommands = commands;
             _pendingSource = source;
             _pendingExpiresAt = DateTime.Now.AddMinutes(10);
             Show("AI 调课（待确认）",
-                $"{Prefix(source)}检测到 AI 解析调课：{command}，是否应用？回复 #确认 应用，或回复 #放弃 取消（10 分钟内有效）");
+                $"{Prefix(source)}检测到批量调课：{Describe(commands)}。回复 #确认 应用全部，或回复 #放弃 取消（10 分钟内有效）");
             return;
         }
 
-        await ApplyCommandAndNotifyAsync(command, source, cancellationToken);
+        await ApplyCommandsAndNotifyAsync(commands, source, cancellationToken);
     }
+
+    /// <summary>把指令列表渲染成「1. 第3节 语文→数学；2. 第5节 英语→物理」。</summary>
+    private static string Describe(IReadOnlyList<TiaokeCommand> commands) =>
+        commands.Count == 1
+            ? commands[0].ToString()
+            : string.Join("；", commands.Select((c, index) => $"{index + 1}. {c}"));
 
     /// <summary>
     /// 来源前缀：QQ 不显示，其它来源（如小橙看班）在提醒正文里标注，方便分辨消息从哪来。
@@ -321,53 +327,74 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     }
 
     /// <summary>
-    /// 执行调课/撤销并弹出结果提醒。返回是否成功执行（异常时返回 false，便于保留待确认状态）。
+    /// 执行一批调课/撤销并弹出结果提醒。返回是否有成功项（异常时返回 false，便于保留待确认状态）。
     ///
     /// 注意：必须在 UI 线程执行。CreateTempClassPlan() 会修改 Profile.OverlayClassPlanId，
     /// 触发 ClassIsland 课表网格（Avalonia 控件）的响应式刷新；在后台线程调用会抛
     /// "Call from invalid thread"。
     /// </summary>
-    private async Task<bool> ApplyCommandAndNotifyAsync(TiaokeCommand command, string source, CancellationToken cancellationToken)
+    private async Task<bool> ApplyCommandsAndNotifyAsync(
+        IReadOnlyList<TiaokeCommand> commands,
+        string source,
+        CancellationToken cancellationToken)
     {
-        PatchOutcome outcome;
+        BatchPatchOutcome outcome;
         try
         {
-            outcome = await Dispatcher.UIThread.InvokeAsync(() =>
-            {
-                var isUndo = command.Kind == TiaokeCommandKind.Undo;
-                return isUndo
-                    ? command.Lesson > 0
-                        ? _patcher.UndoLesson(command.Lesson)
-                        : _patcher.Undo()
-                    : _patcher.Apply(command);
-            });
+            outcome = await Dispatcher.UIThread.InvokeAsync(() => ExecuteOnUiThread(commands));
         }
         catch (Exception ex)
         {
             // 不再静默：日志写清楚，提醒也告诉用户去看日志。
-            _logger.LogWarning(ex, "执行调课失败（{Command} / {Source}）", command, source);
-            Show("调课失败", $"{Prefix(source)}{command}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
+            _logger.LogWarning(ex, "执行调课失败（{Count} 条 / {Source}）", commands.Count, source);
+            Show("调课失败", $"{Prefix(source)}{Describe(commands)}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
             return false;
         }
 
-        var title = (command.Kind == TiaokeCommandKind.Undo, outcome.Applied) switch
+        var title = (outcome.AnyApplied, outcome.Failures.Count) switch
         {
-            (true, true) => "调课已撤销",
-            (true, false) => "撤销失败",
-            (false, true) => "调课已同步",
+            (true, 0) => "调课已执行",
+            (true, _) => "调课部分成功",
             _ => "调课失败"
         };
 
-        Show(title, $"{Prefix(source)}{command}：{outcome.Message}");
-        return outcome.Applied;
+        Show(title, $"{Prefix(source)}{outcome.Summary()}");
+        return outcome.AnyApplied;
+    }
+
+    /// <summary>在 UI 线程内执行：撤销 + 调课/互换，汇总成「部分成功」结果。</summary>
+    private BatchPatchOutcome ExecuteOnUiThread(IReadOnlyList<TiaokeCommand> commands)
+    {
+        var applied = new List<string>();
+        var failures = new List<string>();
+
+        var undoCommands = commands.Where(c => c.Kind == TiaokeCommandKind.Undo).ToList();
+        if (undoCommands.Count > 0)
+        {
+            var lessons = undoCommands.Where(c => c.Lesson > 0).Select(c => c.Lesson).Distinct().ToList();
+            var undoAll = undoCommands.Any(c => c.Lesson <= 0);
+            var undoOutcome = _patcher.UndoLessons(undoAll ? Array.Empty<int>() : lessons);
+            applied.AddRange(undoOutcome.Applied);
+            failures.AddRange(undoOutcome.Failures);
+        }
+
+        var workCommands = commands.Where(c => c.Kind != TiaokeCommandKind.Undo).ToList();
+        if (workCommands.Count > 0)
+        {
+            var applyOutcome = _patcher.ApplyBatch(workCommands);
+            applied.AddRange(applyOutcome.Applied);
+            failures.AddRange(applyOutcome.Failures);
+        }
+
+        return new BatchPatchOutcome(applied, failures);
     }
 
     /// <summary>
-    /// 处理「#确认」：应用挂起的 AI 调课。执行失败时保留待确认状态，允许重试。
+    /// 处理「#确认」：应用挂起的 AI 批量调课。执行失败时保留待确认状态，允许重试。
     /// </summary>
     private async Task ApplyPendingAiCommandAsync(CancellationToken cancellationToken)
     {
-        if (_pendingAiCommand is not { } command)
+        if (_pendingCommands is not { } commands)
         {
             Show("调课待确认", "当前没有待确认的调课");
             return;
@@ -375,15 +402,15 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
 
         if (DateTime.Now > _pendingExpiresAt)
         {
-            _pendingAiCommand = null;
+            _pendingCommands = null;
             Show("调课待确认", "待确认的调课已过期（超过 10 分钟），请重新发送");
             return;
         }
 
-        var applied = await ApplyCommandAndNotifyAsync(command, _pendingSource, cancellationToken);
-        if (applied || _pendingAiCommand is null)
+        var applied = await ApplyCommandsAndNotifyAsync(commands, _pendingSource, cancellationToken);
+        if (applied || _pendingCommands is null)
         {
-            _pendingAiCommand = null;
+            _pendingCommands = null;
         }
     }
 

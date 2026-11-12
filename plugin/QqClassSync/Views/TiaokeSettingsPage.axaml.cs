@@ -115,17 +115,25 @@ public partial class TiaokeSettingsPage : SettingsPageBase
 
     private void OnUndoLessonClick(object? sender, RoutedEventArgs e)
     {
-        if (!int.TryParse(LessonInput.Text?.Trim(), out var lesson) || lesson <= 0)
+        // 支持一次撤销多节，例如输入 3 或 3,5
+        var lessons = (LessonInput.Text ?? string.Empty)
+            .Split([',', '，', '、', ' ', ';', '；'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(part => int.TryParse(part.Trim(), out var n) ? n : 0)
+            .Where(n => n > 0)
+            .Distinct()
+            .ToList();
+
+        if (lessons.Count == 0)
         {
-            UndoStatusText.Text = "请输入有效的节次（例如 3）";
+            UndoStatusText.Text = "请输入有效的节次（例如 3 或 3,5）";
             return;
         }
 
         try
         {
             var patcher = IAppHost.GetService<TempClassPlanPatcher>();
-            var outcome = patcher.UndoLesson(lesson);
-            UndoStatusText.Text = outcome.Message;
+            var outcome = patcher.UndoLessons(lessons);
+            UndoStatusText.Text = outcome.Summary();
         }
         catch (Exception ex)
         {

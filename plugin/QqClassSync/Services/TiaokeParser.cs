@@ -4,22 +4,39 @@ using QqClassSync.Models;
 namespace QqClassSync.Services;
 
 /// <summary>
-/// 解析「#调课 第X节 A改B」与「#撤销调课」这两类群聊/私聊指令。
+/// 解析调课指令，支持一条消息里包含多条（批量）：
+///   #调课 第3节 语文改数学，第5节 英语改物理
+///   #调课 第1节和第2节都换成自习
+///   #调课 第3节和第5节互换
+///   #撤销调课 第3,5节
 /// </summary>
 public sealed class TiaokeParser
 {
-    // A改B / A换B / A改成B / A换成B 都接受；科目名限制长度，避免把整句吞进去。
-    // 注意多词关键词要排在前面（否则「改成」会被「改」抢先匹配成「成XX」）。
-    private static readonly Regex CommandPattern = new(
-        @"第\s*(?<lesson>[0-9零〇一二两三四五六七八九十百]{1,3})\s*节\s*
-          (?<from>[^\s，,。；;、:：]{1,8}?)\s*
-          (?:改成|换成|改为|换为|调成|改|换)\s*
-          (?<to>[^\s，,。；;、!！?？]{1,8})",
-        RegexOptions.Compiled | RegexOptions.IgnorePatternWhitespace);
+    private const int MaxCommandsPerMessage = 10;
 
-    private static readonly Regex UndoPattern = new(
-        @"第\s*(?<lesson>[0-9零〇一二两三四五六七八九十百]{1,3})\s*节",
+    // 节次：阿拉伯/中文数字
+    private const string Num = @"[0-9零〇一二两三四五六七八九十百]{1,3}";
+    // 科目：不含空白与标点/数字，长度 1-8
+    private const string Subject = @"[^\s，,。；;、:：!！?？0-9]{1,8}";
+
+    private static readonly Regex SinglePattern = new(
+        $@"第\s*(?<lesson>{Num})\s*节\s*(?<from>{Subject})?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
         RegexOptions.Compiled);
+
+    private static readonly Regex PairSamePattern = new(
+        $@"第\s*(?<a>{Num})\s*节\s*(?:和|与|跟|、)\s*第\s*(?<b>{Num})\s*节\s*(?:都|一起|全部|均)?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
+        RegexOptions.Compiled);
+
+    private static readonly Regex SwapPattern = new(
+        $@"第\s*(?<a>{Num})\s*节\s*(?:和|与|跟)\s*第\s*(?<b>{Num})\s*节\s*(?:互换|交换|对调)",
+        RegexOptions.Compiled);
+
+    // 撤销后的节次列表：第3,5节 / 第3、5节 / 第3节和第5节
+    private static readonly Regex UndoLessonsPattern = new(
+        $@"第\s*(?<ns>{Num}(?:\s*[,，、和与]\s*{Num})*)\s*节",
+        RegexOptions.Compiled);
+
+    private static readonly Regex NumberSplitPattern = new(@"[,，、和与]", RegexOptions.Compiled);
 
     // 撤销指令的触发词。注意「#撤销调课」里并不包含「#调课」，所以要单独识别。
     private static readonly string[] UndoTokens = ["#撤销调课", "#取消调课", "撤销调课", "取消调课", "撤销换课"];
@@ -38,9 +55,7 @@ public sealed class TiaokeParser
         !string.IsNullOrWhiteSpace(text)
         && AcceptDropTokens.Any(token => text.Contains(token, StringComparison.Ordinal));
 
-    /// <summary>
-    /// 这条文本是否像是给我们插件的指令（决定要不要进解析流程）。
-    /// </summary>
+    /// <summary>这条文本是否像是给我们插件的指令（决定要不要进解析流程）。</summary>
     public bool MentionsCommand(string text, string keyword)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -61,11 +76,7 @@ public sealed class TiaokeParser
         return UndoTokens.Any(token => text.Contains(token, StringComparison.Ordinal));
     }
 
-    /// <summary>
-    /// 解析调课 / 撤销指令。
-    /// </summary>
-    /// <param name="text">Toast 合并后的文本。</param>
-    /// <param name="keyword">触发关键词，默认 #调课。</param>
+    /// <summary>解析调课 / 撤销指令，可能返回多条。</summary>
     public TiaokeParseResult Parse(string text, string keyword)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -76,9 +87,7 @@ public sealed class TiaokeParser
         // 撤销优先：避免「#撤销调课」被当成普通调课处理。
         if (UndoTokens.FirstOrDefault(token => text.Contains(token, StringComparison.Ordinal)) is { } undoToken)
         {
-            var lessonMatch = UndoPattern.Match(text[(text.IndexOf(undoToken, StringComparison.Ordinal) + undoToken.Length)..]);
-            var lesson = lessonMatch.Success ? ParseNumber(lessonMatch.Groups["lesson"].Value) ?? 0 : 0;
-            return TiaokeParseResult.Ok(TiaokeCommand.Undo(lesson, text.Trim()));
+            return ParseUndo(text, undoToken);
         }
 
         var index = text.IndexOf(keyword, StringComparison.Ordinal);
@@ -88,36 +97,97 @@ public sealed class TiaokeParser
         }
 
         var payload = text[(index + keyword.Length)..];
-        var match = CommandPattern.Match(payload);
-        if (!match.Success)
+        var segments = payload.Split(['，', ',', '；', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries);
+
+        var commands = new List<TiaokeCommand>();
+        foreach (var rawSegment in segments)
         {
-            return TiaokeParseResult.Fail("格式不符，应为「#调课 第X节 原科目改新科目」");
+            var segment = rawSegment.Trim();
+            if (segment.Length == 0)
+            {
+                continue;
+            }
+
+            // 1) 两节一起换同一科目：第1节和第2节都换成自习
+            var pairSame = PairSamePattern.Match(segment);
+            if (pairSame.Success
+                && ParseNumber(pairSame.Groups["a"].Value) is { } a1
+                && ParseNumber(pairSame.Groups["b"].Value) is { } b1)
+            {
+                var to = pairSame.Groups["to"].Value.Trim();
+                commands.Add(TiaokeCommand.Apply(a1, string.Empty, to, text.Trim()));
+                commands.Add(TiaokeCommand.Apply(b1, string.Empty, to, text.Trim()));
+                continue;
+            }
+
+            // 2) 两节互换：第3节和第5节互换
+            var swap = SwapPattern.Match(segment);
+            if (swap.Success
+                && ParseNumber(swap.Groups["a"].Value) is { } a2
+                && ParseNumber(swap.Groups["b"].Value) is { } b2)
+            {
+                commands.Add(TiaokeCommand.Swap(a2, b2, text.Trim()));
+                continue;
+            }
+
+            // 3) 单节调课：第3节 语文改数学
+            var single = SinglePattern.Match(segment);
+            if (single.Success && ParseNumber(single.Groups["lesson"].Value) is { } lesson)
+            {
+                var from = single.Groups["from"].Value.Trim();
+                var to = single.Groups["to"].Value.Trim();
+                if (to.Length == 0)
+                {
+                    continue;
+                }
+
+                if (string.Equals(from, to, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                commands.Add(TiaokeCommand.Apply(lesson, from, to, text.Trim()));
+            }
         }
 
-        var lessonNumber = ParseNumber(match.Groups["lesson"].Value);
-        if (lessonNumber is null or <= 0 or > 20)
+        if (commands.Count == 0)
         {
-            return TiaokeParseResult.Fail($"节次「{match.Groups["lesson"].Value}」无法识别");
+            return TiaokeParseResult.Fail("格式不符，应为「#调课 第X节 原科目改新科目」，多条可用逗号分隔");
         }
 
-        var from = match.Groups["from"].Value.Trim();
-        var to = match.Groups["to"].Value.Trim();
-        if (from.Length == 0 || to.Length == 0)
+        if (commands.Count > MaxCommandsPerMessage)
         {
-            return TiaokeParseResult.Fail("科目名称为空");
+            return TiaokeParseResult.Fail($"一条消息最多支持 {MaxCommandsPerMessage} 条调课指令");
         }
 
-        if (string.Equals(from, to, StringComparison.Ordinal))
-        {
-            return TiaokeParseResult.Fail($"{from} 改 {to} 没有实际变化");
-        }
-
-        return TiaokeParseResult.Ok(TiaokeCommand.Apply(lessonNumber.Value, from, to, text.Trim()));
+        return TiaokeParseResult.Ok(commands);
     }
 
-    /// <summary>
-    /// 支持阿拉伯数字与中文数字（一、二、两、十、十二、二十等）。
-    /// </summary>
+    private static TiaokeParseResult ParseUndo(string text, string undoToken)
+    {
+        var tail = text[(text.IndexOf(undoToken, StringComparison.Ordinal) + undoToken.Length)..];
+        var lessons = new List<int>();
+        foreach (Match match in UndoLessonsPattern.Matches(tail))
+        {
+            foreach (var part in NumberSplitPattern.Split(match.Groups["ns"].Value))
+            {
+                if (ParseNumber(part) is { } lesson && lesson > 0)
+                {
+                    lessons.Add(lesson);
+                }
+            }
+        }
+
+        var distinct = lessons.Distinct().OrderBy(x => x).ToList();
+        if (distinct.Count == 0)
+        {
+            return TiaokeParseResult.Ok(TiaokeCommand.Undo(0, text.Trim()));
+        }
+
+        return TiaokeParseResult.Ok(distinct.Select(l => TiaokeCommand.Undo(l, text.Trim())).ToList());
+    }
+
+    /// <summary>支持阿拉伯数字与中文数字（一、二、两、十、十二、二十等）。</summary>
     internal static int? ParseNumber(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))

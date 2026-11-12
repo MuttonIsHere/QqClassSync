@@ -172,18 +172,18 @@
             </controls:SettingsExpander>
 
             <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE71D;}"
-                                       Header="撤销单节课"
-                                       Description="只把指定节次恢复成原科目，其他调课保留；也可以发「#撤销调课 第3节」">
+                                       Header="撤销单节课 / 批量撤销"
+                                       Description="只把指定节次恢复成原科目，其他调课保留；可填 3 或 3,5。也可以发「#撤销调课 第3,5节」">
                 <controls:SettingsExpander.Footer>
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBox x:Name="LessonInput"
-                                 Width="64"
+                                 Width="90"
                                  VerticalAlignment="Center"
-                                 Watermark="节次" />
+                                 Watermark="3 或 3,5" />
                         <Button Click="OnUndoLessonClick">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <ci:FluentIcon Glyph="&#xE71D;" />
-                                <TextBlock Text="撤销这一节" />
+                                <TextBlock Text="撤销这些节" />
                             </StackPanel>
                         </Button>
                     </StackPanel>

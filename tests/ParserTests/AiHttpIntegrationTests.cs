@@ -13,7 +13,7 @@ namespace QqSync.Tests;
 internal static class AiHttpIntegrationTests
 {
     private const string OkResponse =
-        "{\"choices\":[{\"message\":{\"content\":\"{\\\"Lesson\\\": 3, \\\"OriginalSubject\\\": \\\"\\\", \\\"NewSubject\\\": \\\"数学\\\"}\"}}]}";
+        "{\"choices\":[{\"message\":{\"content\":\"[{\\\"Lesson\\\": 3, \\\"OriginalSubject\\\": \\\"\\\", \\\"NewSubject\\\": \\\"数学\\\"},{\\\"Lesson\\\": 5, \\\"OriginalSubject\\\": \\\"\\\", \\\"NewSubject\\\": \\\"物理\\\"}]\"}}]}";
 
     public static int Run()
     {
@@ -29,14 +29,17 @@ internal static class AiHttpIntegrationTests
                 AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
-            var result = parser.TryParseAsync("今天第三节课不上了，让数学老师来上", CancellationToken.None)
+            var result = parser.TryParseAsync("第3节换成数学，第5节换成物理", CancellationToken.None)
                 .GetAwaiter().GetResult();
 
             failed += Check(
                 result is { Success: true }
-                && result.Command!.Lesson == 3
-                && result.Command.ToSubject == "数学",
-                "HTTP 成功路径：自然语言 → 第3节数学");
+                && result.Commands.Count == 2
+                && result.Commands[0].Lesson == 3
+                && result.Commands[0].ToSubject == "数学"
+                && result.Commands[1].Lesson == 5
+                && result.Commands[1].ToSubject == "物理",
+                "HTTP 成功路径：批量数组 → 第3节数学 / 第5节物理");
 
             failed += Check(server.LastPath.Contains("/v1/chat/completions"), "请求打到 /chat/completions");
             failed += Check(server.LastBody.Contains("deepseek-chat"), "请求体带 model");
@@ -59,9 +62,9 @@ internal static class AiHttpIntegrationTests
             failed += Check(result is null, "HTTP 500 → 返回 null（回退正则）");
         }
 
-        // 3) 模型返回 {}（无调课意图）→ null
+        // 3) 模型返回 []（无调课意图）→ null
         using (var server = new MockServer(
-                   "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}", 200))
+                   "{\"choices\":[{\"message\":{\"content\":\"[]\"}}]}", 200))
         {
             var settings = new TiaokeSettings
             {
@@ -71,7 +74,7 @@ internal static class AiHttpIntegrationTests
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("今天作业好多", CancellationToken.None).GetAwaiter().GetResult();
-            failed += Check(result is null, "模型返回 {} → null");
+            failed += Check(result is null, "模型返回 [] → null");
         }
 
         // 4) 未配置（空 Key）→ 不发请求
