@@ -1,0 +1,18 @@
+# 构建产物
+bin/
+obj/
+cipx/
+
+# 本地参考仓库（浅克隆的第三方代码，不入库）
+ref/
+
+# 早期无 .NET SDK 时代的探针（已废弃，仅本地留档）
+spike/legacy-csc/
+
+# IDE / 系统
+.vs/
+.idea/
+*.user
+*.suo
+Thumbs.db
+.DS_Store

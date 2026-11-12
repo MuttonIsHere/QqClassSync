@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ParserTests</AssemblyName>
+    <RootNamespace>QqSync.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 直接复用插件的解析器源码，避免复制粘贴 -->
+    <Compile Include="../../plugin/QqClassSync/Services/TiaokeParser.cs" Link="TiaokeParser.cs" />
+    <Compile Include="../../plugin/QqClassSync/Models/TiaokeParseResult.cs" Link="TiaokeParseResult.cs" />
+  </ItemGroup>
+
+</Project>
