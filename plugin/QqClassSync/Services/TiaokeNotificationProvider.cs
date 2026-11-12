@@ -27,6 +27,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private readonly TiaokeSettings _settings;
     private readonly QqToastScanner _scanner;
     private readonly TiaokeParser _parser;
+    private readonly AiTiaokeParser _aiParser;
     private readonly TempClassPlanPatcher _patcher;
     private readonly ILogger<TiaokeNotificationProvider> _logger;
 
@@ -39,12 +40,14 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         TiaokeSettings settings,
         QqToastScanner scanner,
         TiaokeParser parser,
+        AiTiaokeParser aiParser,
         TempClassPlanPatcher patcher,
         ILogger<TiaokeNotificationProvider> logger)
     {
         _settings = settings;
         _scanner = scanner;
         _parser = parser;
+        _aiParser = aiParser;
         _patcher = patcher;
         _logger = logger;
 
@@ -58,6 +61,11 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             "QQ 调课同步已启动（间隔 {Interval}s，关键词 {Keyword}，自动应用 {AutoApply}）",
             settings.ScanIntervalSeconds, settings.Keyword, settings.AutoApply);
         _logger.LogInformation("今天生效的课表：{Plan}", patcher.DescribeTodayPlan());
+        _logger.LogInformation(
+            "AI 解析：{Status}",
+            _aiParser.IsConfigured
+                ? "已配置（本版本尚未接入模型调用，仍走正则解析）"
+                : "未启用或未填写 Key，使用正则解析（不会报错）");
     }
 
     Task IHostedService.StartAsync(CancellationToken cancellationToken)
@@ -129,7 +137,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                         cancellationToken.ThrowIfCancellationRequested();
                         try
                         {
-                            HandleToast(toast);
+                            await HandleToastAsync(toast, cancellationToken);
                         }
                         catch (Exception ex)
                         {
@@ -167,7 +175,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
     }
 
-    private void HandleToast(ToastSnapshot toast)
+    private async Task HandleToastAsync(ToastSnapshot toast, CancellationToken cancellationToken)
     {
         var text = toast.FullText;
         if (!_parser.MentionsCommand(text, _settings.Keyword))
@@ -175,7 +183,21 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             return;
         }
 
+        // 先用正则：命中就结束（快、免费、离线可靠）。
+        // 没命中且 AI 已配置时，才尝试 AI 模糊解析；AI 不可用/失败会返回 null，自动回退。
         var parse = _parser.Parse(text, _settings.Keyword);
+        var fromAi = false;
+        if (!parse.Success)
+        {
+            var aiResult = await _aiParser.TryParseAsync(text, cancellationToken);
+            if (aiResult is { Success: true })
+            {
+                parse = aiResult;
+                fromAi = true;
+                _logger.LogInformation("AI 解析命中：{Command}", aiResult.Command);
+            }
+        }
+
         if (!parse.Success)
         {
             if (_settings.NotifyOnParseFailure)
@@ -187,11 +209,18 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         var command = parse.Command!;
-        _logger.LogInformation("解析到指令：{Command}", command);
+        _logger.LogInformation("解析到指令：{Command}（来源：{Source}）", command, fromAi ? "AI" : "正则");
 
         if (!_settings.AutoApply)
         {
             Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未执行");
+            return;
+        }
+
+        // AI 解析的结果默认要先确认（防误判/防把闲聊当调课）。
+        if (fromAi && _settings.AiConfirmBeforeSend)
+        {
+            Show("AI 调课（待确认）", $"解析到 {command}，请到设置页确认后再执行");
             return;
         }
 

@@ -13,6 +13,7 @@
     <!-- 直接复用插件的源码，避免复制粘贴 -->
     <Compile Include="../../plugin/QqClassSync/Services/TiaokeParser.cs" Link="TiaokeParser.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/LessonUndoJournal.cs" Link="LessonUndoJournal.cs" />
+    <Compile Include="../../plugin/QqClassSync/Services/AiParsePolicy.cs" Link="AiParsePolicy.cs" />
     <Compile Include="../../plugin/QqClassSync/Models/TiaokeParseResult.cs" Link="TiaokeParseResult.cs" />
     <Compile Include="../../plugin/QqClassSync/Models/LessonPatchRecord.cs" Link="LessonPatchRecord.cs" />
   </ItemGroup>

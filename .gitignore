@@ -3,6 +3,11 @@ bin/
 obj/
 cipx/
 
+# 本地真实配置（含 API Key / 调课日志）绝不入库
+Settings.json
+TempPatches.json
+*.local.json
+
 # 本地参考仓库（浅克隆的第三方代码，不入库）
 ref/
 

@@ -1,0 +1,14 @@
+{
+  "Enabled": true,
+  "Keyword": "#调课",
+  "ScanIntervalSeconds": 1,
+  "AutoApply": true,
+  "NotifyOnParseFailure": true,
+  "AllowedAppNames": ["QQ", "腾讯QQ", "TIM"],
+  "AllowedAppIds": ["Tencent.QQNT", "com.tencent.qq", "com.tencent.tim", "QQ"],
+
+  "AiEnabled": false,
+  "AiApiKey": "sk-xxxxxxxx",
+  "AiBaseUrl": "https://api.deepseek.com/v1",
+  "AiConfirmBeforeSend": true
+}

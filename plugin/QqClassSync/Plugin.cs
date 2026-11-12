@@ -22,6 +22,7 @@ public class Plugin : PluginBase
         services.AddSingleton(settings);
         services.AddSingleton(journal);
         services.AddSingleton<TiaokeParser>();
+        services.AddSingleton<AiTiaokeParser>();
         services.AddSingleton<QqToastScanner>();
         services.AddSingleton<TempClassPlanPatcher>();
         services.AddNotificationProvider<TiaokeNotificationProvider>();

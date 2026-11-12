@@ -8,10 +8,10 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <EnableDynamicLoading>True</EnableDynamicLoading>
-    <Version>1.1.0.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
-    <InformationalVersion>1.1.0.0</InformationalVersion>
+    <Version>1.1.1.0</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
+    <InformationalVersion>1.1.1.0</InformationalVersion>
     <!-- 插件 DLL 由宿主加载，自带依赖会让 ClassIsland 的插件加载上下文混乱 -->
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>

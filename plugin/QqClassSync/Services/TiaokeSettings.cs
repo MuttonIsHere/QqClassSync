@@ -55,6 +55,26 @@ public partial class TiaokeSettings : ObservableObject
     private string[] _allowedAppIds =
         ["Tencent.QQNT", "com.tencent.qq", "com.tencent.tim", "QQ"];
 
+    /// <summary>
+    /// 是否启用 AI 模糊解析（实验性）。默认关闭；关闭或 Key 为空时自动回退正则解析。
+    /// </summary>
+    [ObservableProperty]
+    private bool _aiEnabled;
+
+    /// <summary>
+    /// DeepSeek API Key。默认空；只保存在本机 Settings.json，不会进入仓库。
+    /// </summary>
+    [ObservableProperty]
+    private string _aiApiKey = string.Empty;
+
+    /// <summary>AI 接口地址，默认 https://api.deepseek.com/v1。</summary>
+    [ObservableProperty]
+    private string _aiBaseUrl = AiParsePolicy.DefaultBaseUrl;
+
+    /// <summary>AI 解析出的结果是否要先确认再执行（默认开启，隐私/误判保护）。</summary>
+    [ObservableProperty]
+    private bool _aiConfirmBeforeSend = true;
+
     [JsonIgnore]
     public string FilePath { get; private set; } = string.Empty;
 
@@ -146,6 +166,10 @@ public partial class TiaokeSettings : ObservableObject
         NotifyOnParseFailure = other.NotifyOnParseFailure;
         AllowedAppNames = other.AllowedAppNames;
         AllowedAppIds = other.AllowedAppIds;
+        AiEnabled = other.AiEnabled;
+        AiApiKey = other.AiApiKey;
+        AiBaseUrl = other.AiBaseUrl;
+        AiConfirmBeforeSend = other.AiConfirmBeforeSend;
     }
 
     public void Normalize()
@@ -156,6 +180,10 @@ public partial class TiaokeSettings : ObservableObject
         }
 
         ScanIntervalSeconds = Math.Clamp(ScanIntervalSeconds, 0.3, 10);
+
+        // AI 配置：Key 去掉首尾空白；Base URL 去尾斜杠，空值回落默认。
+        AiApiKey = (AiApiKey ?? string.Empty).Trim();
+        AiBaseUrl = AiParsePolicy.NormalizeBaseUrl(AiBaseUrl);
     }
 
     public void Save()

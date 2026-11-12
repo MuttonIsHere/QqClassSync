@@ -125,6 +125,34 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 - `AllowedAppNames` / `AllowedAppIds`：通知来源白名单，联调时可加入测试应用。
 - **群聊 / 私聊 / 系统消息都能收**：插件只判断「是不是 QQ 的 Toast」和「文本里有没有关键词」，不区分聊天类型。
 
+## 🔐 AI 解析配置与密钥安全（v1.1.1）
+
+设置页新增「AI 模糊解析（实验性）」区块：
+
+![AI 配置](docs/images/settings-page-ai.png)
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| 启用 AI 解析 | **关** | 关着就完全走正则，不碰网络 |
+| 发送前确认 | **开** | AI 解析结果只提醒、不直接执行 |
+| API Key | **空** | 只存本机 `Settings.json`；留空自动回退正则 |
+| API Base URL | `https://api.deepseek.com/v1` | 可改成任意 OpenAI 兼容接口 |
+
+**「留空不崩」是怎么保证的**
+
+- AI 是否可用由 `AiParsePolicy.IsConfigured(开关, Key, BaseUrl)` 三重判定，任一不满足即 `false`
+- 解析路由：**先正则**（命中就结束，快、免费、离线）→ 未命中且 AI 可用才尝试 AI → AI 不可用/异常一律返回 `null` 并静默回退
+- 启动日志可核对：`AI 解析：未启用或未填写 Key，使用正则解析（不会报错）`
+
+**密钥安全**
+
+- 真实配置在 `<ClassIsland>\data\Config\Plugins\qq.classsync\Settings.json`，**在 ClassIsland 的 data 目录里，本来就不在仓库内**
+- `.gitignore` 额外兜底：`Settings.json`、`TempPatches.json`、`*.local.json` 一律不入库
+- 仓库只放样例：[Settings.sample.json](Settings.sample.json)，Key 为占位符 `sk-xxxxxxxx`
+- Key 不做环境变量（对老师门槛太高），只存本地文件
+- 日志与设置页状态只显示脱敏值（`sk-12…abcd`）
+- 开源项目「敢发代码」的原因：代码里没有 Key，Key 是使用者运行时自己填的数据；泄露只发生在误提交配置文件或硬编码时
+
 ## 已修复的两个关键 bug
 
 1. **通知在后台线程构建** → `NotificationContent.CreateTwoIconsMask` 内部会 `new LucideIconSource`（Avalonia 对象），

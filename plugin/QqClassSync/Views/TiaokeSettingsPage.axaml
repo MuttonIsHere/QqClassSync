@@ -87,6 +87,58 @@
                 </controls:SettingsExpander.Footer>
             </controls:SettingsExpander>
 
+            <!-- AI 模糊解析 -->
+            <TextBlock FontSize="18"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                       Margin="0,20,0,0">
+                AI 模糊解析（实验性）
+            </TextBlock>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE99A;}"
+                                       Header="启用 AI 解析"
+                                       Description="把自然语言调课交给大模型解析；未填 Key 时自动回退正则解析">
+                <controls:SettingsExpander.Footer>
+                    <ToggleSwitch IsChecked="{Binding AiEnabled, Mode=TwoWay}" />
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE8D7;}"
+                                       Header="发送前确认"
+                                       Description="AI 解析出的调课只提醒、不直接执行（防误判，也少把消息发出去）">
+                <controls:SettingsExpander.Footer>
+                    <ToggleSwitch IsChecked="{Binding AiConfirmBeforeSend, Mode=TwoWay}" />
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE72E;}"
+                                       Header="API Key"
+                                       Description="只保存在本机 Settings.json；留空则完全走正则解析，不会报错">
+                <controls:SettingsExpander.Footer>
+                    <TextBox Text="{Binding AiApiKey, Mode=TwoWay}"
+                             PasswordChar="●"
+                             Width="280"
+                             HorizontalAlignment="Right"
+                             Watermark="sk-..." />
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE774;}"
+                                       Header="API Base URL"
+                                       Description="默认 https://api.deepseek.com/v1">
+                <controls:SettingsExpander.Footer>
+                    <TextBox Text="{Binding AiBaseUrl, Mode=TwoWay}"
+                             Width="320"
+                             HorizontalAlignment="Right" />
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <TextBlock x:Name="AiStatusText"
+                       FontSize="12"
+                       Margin="4,4,0,12"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+
             <!-- 调课操作 -->
             <TextBlock FontSize="18"
                        FontWeight="SemiBold"

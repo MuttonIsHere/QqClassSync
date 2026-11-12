@@ -39,6 +39,10 @@ internal static class Program
         _failed += journalFailures;
 
         Console.WriteLine();
+        Console.WriteLine("=== AI 解析配置判定 ===");
+        _failed += AiParsePolicyTests.Run();
+
+        Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "全部用例通过" : $"有 {_failed} 个用例失败");
         return _failed == 0 ? 0 : 1;
     }

@@ -28,6 +28,7 @@ public partial class TiaokeSettingsPage : SettingsPageBase
         _settings.PropertyChanged -= OnSettingsPropertyChanged;
         _settings.PropertyChanged += OnSettingsPropertyChanged;
         RefreshPlanStatus();
+        RefreshAiStatus();
     }
 
     private static TiaokeSettings TryResolveSettings()
@@ -45,6 +46,15 @@ public partial class TiaokeSettingsPage : SettingsPageBase
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // AI 相关配置改动时实时刷新状态文案（不会显示 Key 明文）。
+        if (e.PropertyName is nameof(TiaokeSettings.AiEnabled)
+            or nameof(TiaokeSettings.AiApiKey)
+            or nameof(TiaokeSettings.AiBaseUrl)
+            or nameof(TiaokeSettings.AiConfirmBeforeSend))
+        {
+            RefreshAiStatus();
+        }
+
         _saveTimer ??= CreateSaveTimer();
         _saveTimer.Stop();
         _saveTimer.Start();
@@ -73,6 +83,7 @@ public partial class TiaokeSettingsPage : SettingsPageBase
     {
         base.OnAttachedToVisualTree(e);
         RefreshPlanStatus();
+        RefreshAiStatus();
     }
 
     protected override void OnDetachedFromVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
@@ -122,6 +133,21 @@ public partial class TiaokeSettingsPage : SettingsPageBase
         }
 
         RefreshPlanStatus();
+    }
+
+    private void RefreshAiStatus()
+    {
+        try
+        {
+            AiStatusText.Text = AiParsePolicy.DescribeStatus(
+                _settings.AiEnabled,
+                _settings.AiApiKey,
+                _settings.AiBaseUrl);
+        }
+        catch
+        {
+            AiStatusText.Text = "AI 状态未知（不影响正则解析）";
+        }
     }
 
     private void RefreshPlanStatus()
