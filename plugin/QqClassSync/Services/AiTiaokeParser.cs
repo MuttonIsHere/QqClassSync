@@ -1,52 +1,163 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using QqClassSync.Models;
 
 namespace QqClassSync.Services;
 
 /// <summary>
-/// AI 模糊解析入口（本版本只做「配置判定 + 安全回退」骨架，模型调用后续接入）。
+/// AI 模糊解析：把自然语言调课交给 OpenAI 兼容接口（默认 DeepSeek）/chat/completions。
 ///
-/// 红线：
-///   - 未启用 / Key 为空 / BaseUrl 为空 → 直接返回 null，调用方静默回退正则解析；
-///   - 任何异常都在内部吞掉并返回 null，绝不让老师发一条消息就把轮询循环打挂。
+/// 隐私红线（务必保持）：
+///   - 日志**不得**打印 QQ 消息原文，也不得打印模型返回原文；
+///   - 只允许出现：「尝试调用 AI 解析」「AI 解析成功」「AI 调用失败（超时/网络错误/...）」。
+///
+/// 稳定性红线：
+///   - 8 秒超时；超时 / HTTP 错误 / JSON 解析失败一律返回 null，由调用方回退正则解析；
+///   - 任何异常都在这里吞掉，绝不把异常抛进轮询循环。
 /// </summary>
 public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokeParser> logger)
 {
-    private bool _notedNotImplemented;
+    private const string Model = "deepseek-chat";
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+
+    // 复用 HttpClient，避免每次请求都建连接池（后台轮询场景下这很重要）。
+    private static readonly HttpClient Http = new() { Timeout = Timeout.InfiniteTimeSpan };
+
+    private const string SystemPrompt = """
+        你是课表指令解析器。用户会给你一条来自老师 QQ 群聊/私聊的消息，请判断其中是否包含「调课指令」。
+        只输出 JSON，不要输出解释、Markdown 或代码块。
+        输出格式：{"Lesson": 3, "OriginalSubject": "语文", "NewSubject": "数学"}
+        规则：
+        1. Lesson 是节次（1-20 的整数）；
+        2. NewSubject 是要换成的科目；
+        3. 如果消息里没提原科目，OriginalSubject 填空字符串 "";
+        4. 如果消息里没有明确的「第几节 + 换成什么科目」，输出 {};
+        5. 不要臆测消息里没有的信息。
+        示例输入：今天第三节课不上了，让数学老师来上
+        示例输出：{"Lesson": 3, "OriginalSubject": "", "NewSubject": "数学"}
+        """;
 
     /// <summary>AI 解析是否可用（开关 + Key + BaseUrl 三者齐全）。</summary>
     public bool IsConfigured =>
         AiParsePolicy.IsConfigured(settings.AiEnabled, settings.AiApiKey, settings.AiBaseUrl);
 
     /// <summary>
-    /// 尝试用 AI 解析。返回 null 表示「AI 不可用或未解析出结果」，调用方应回退正则解析。
+    /// 尝试用 AI 解析。返回 null 表示「AI 不可用 / 无调课意图 / 调用失败」，调用方应回退正则解析。
     /// </summary>
-    public Task<TiaokeParseResult?> TryParseAsync(string text, CancellationToken cancellationToken)
+    public async Task<TiaokeParseResult?> TryParseAsync(string text, CancellationToken cancellationToken)
     {
+        if (!IsConfigured)
+        {
+            return null;
+        }
+
+        logger.LogInformation("尝试调用 AI 解析");
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(RequestTimeout);
+
         try
         {
-            if (!IsConfigured)
+            var content = await RequestCompletionAsync(text, includeResponseFormat: true, cts.Token);
+            if (content is null)
             {
-                return Task.FromResult<TiaokeParseResult?>(null);
+                // 部分 OpenAI 兼容实现不支持 response_format，去掉该参数再试一次。
+                content = await RequestCompletionAsync(text, includeResponseFormat: false, cts.Token);
             }
 
-            if (!_notedNotImplemented)
+            if (content is null)
             {
-                _notedNotImplemented = true;
-                logger.LogInformation(
-                    "AI 解析已配置（{BaseUrl}，Key={Masked}），但当前版本尚未接入模型调用；继续使用正则解析。",
-                    settings.AiBaseUrl,
-                    AiParsePolicy.MaskKey(settings.AiApiKey));
+                logger.LogWarning("AI 调用失败（HTTP 错误）");
+                return null;
             }
 
-            // TODO(下一版)：调用 DeepSeek /chat/completions，把自然语言解析成 TiaokeCommand。
-            // 接入时注意：超时要短（如 8s）、失败一律返回 null 回退正则、日志不打印 Key 和消息正文。
-            return Task.FromResult<TiaokeParseResult?>(null);
+            var outcome = AiResponseParser.TryParse(content, out var reason);
+            if (outcome is null)
+            {
+                if (reason != "no_intent")
+                {
+                    logger.LogWarning("AI 调用失败（返回格式无法解析）");
+                }
+
+                return null;
+            }
+
+            logger.LogInformation("AI 解析成功");
+            return TiaokeParseResult.Ok(TiaokeCommand.Apply(
+                outcome.Lesson,
+                outcome.OriginalSubject,
+                outcome.NewSubject,
+                text));
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("AI 调用失败（超时）");
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            logger.LogWarning("AI 调用失败（网络错误）");
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            // 插件停止导致的外部取消，不算 AI 失败，也不打日志。
+            return null;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "AI 解析异常，已回退正则解析。");
-            return Task.FromResult<TiaokeParseResult?>(null);
+            // 只打异常类型，不打消息内容，避免泄露 QQ 文本或响应体。
+            logger.LogWarning("AI 调用失败（{ErrorKind}）", ex.GetType().Name);
+            return null;
         }
+    }
+
+    /// <summary>
+    /// 发一次 /chat/completions，返回 message.content；HTTP 非 2xx 时返回 null。
+    /// </summary>
+    private async Task<string?> RequestCompletionAsync(string text, bool includeResponseFormat, CancellationToken cancellationToken)
+    {
+        var endpoint = $"{AiParsePolicy.NormalizeBaseUrl(settings.AiBaseUrl)}/chat/completions";
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["model"] = Model,
+            ["temperature"] = 0,
+            ["max_tokens"] = 200,
+            ["messages"] = new object[]
+            {
+                new { role = "system", content = SystemPrompt },
+                new { role = "user", content = text }
+            }
+        };
+
+        if (includeResponseFormat)
+        {
+            payload["response_format"] = new { type = "json_object" };
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.AiApiKey);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken);
+        if (response.StatusCode is HttpStatusCode.BadRequest && includeResponseFormat)
+        {
+            return null;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        return AiResponseParser.ExtractMessageContent(body);
     }
 }

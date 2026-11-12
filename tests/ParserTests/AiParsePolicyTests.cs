@@ -35,6 +35,12 @@ internal static class AiParsePolicyTests
         failed += Check(AiParsePolicy.NormalizeBaseUrl("") == AiParsePolicy.DefaultBaseUrl, "空值回落默认地址");
         failed += Check(AiParsePolicy.NormalizeBaseUrl(null) == AiParsePolicy.DefaultBaseUrl, "null 回落默认地址");
 
+        // 意图预筛：老师的自然语言要能进 AI，闲聊不能
+        failed += Check(AiParsePolicy.LooksLikeIntent("今天第三节课不上了，让数学老师来上"), "自然语言调课应进入 AI 预筛");
+        failed += Check(AiParsePolicy.LooksLikeIntent("第三节换一下，语文老师代课"), "换课/代课应进入预筛");
+        failed += Check(!AiParsePolicy.LooksLikeIntent("今天作业好多啊"), "普通闲聊不应进入预筛");
+        failed += Check(!AiParsePolicy.LooksLikeIntent(""), "空文本不应进入预筛");
+
         return failed;
     }
 

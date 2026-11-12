@@ -125,7 +125,7 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 - `AllowedAppNames` / `AllowedAppIds`：通知来源白名单，联调时可加入测试应用。
 - **群聊 / 私聊 / 系统消息都能收**：插件只判断「是不是 QQ 的 Toast」和「文本里有没有关键词」，不区分聊天类型。
 
-## 🔐 AI 解析配置与密钥安全（v1.1.1）
+## 🔐 AI 解析配置与密钥安全（v1.2.0）
 
 设置页新增「AI 模糊解析（实验性）」区块：
 
@@ -144,6 +144,15 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 - 解析路由：**先正则**（命中就结束，快、免费、离线）→ 未命中且 AI 可用才尝试 AI → AI 不可用/异常一律返回 `null` 并静默回退
 - 启动日志可核对：`AI 解析：未启用或未填写 Key，使用正则解析（不会报错）`
 
+**调用细节（v1.2.0 起真正联网）**
+
+- `POST {BaseUrl}/chat/completions`，`model: deepseek-chat`，`temperature: 0`，强制 JSON 输出
+- **8 秒超时**；超时 / 网络错误 / HTTP 非 2xx / 返回格式不对 → 一律返回 `null`，静默回退正则
+- **意图预筛**：只有像调课的消息（含「调课/换课/代课/不上/来上/换成…」）才会送进大模型，闲聊不消耗 token
+- **发送前确认**（默认开）：AI 解析出结果先弹「检测到 AI 解析调课：第3节 →数学，是否应用？」，在 QQ 里回 `#确认` 应用、`#放弃` 取消（10 分钟有效）
+- 日志红线：**不打印 QQ 消息原文、不打印模型返回原文、不打印 Key**，只允许
+  「尝试调用 AI 解析 / AI 解析成功 / AI 调用失败（超时/网络错误/HTTP 错误/返回格式无法解析）」
+
 **密钥安全**
 
 - 真实配置在 `<ClassIsland>\data\Config\Plugins\qq.classsync\Settings.json`，**在 ClassIsland 的 data 目录里，本来就不在仓库内**
@@ -153,24 +162,48 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 - 日志与设置页状态只显示脱敏值（`sk-12…abcd`）
 - 开源项目「敢发代码」的原因：代码里没有 Key，Key 是使用者运行时自己填的数据；泄露只发生在误提交配置文件或硬编码时
 
-## 已修复的两个关键 bug
+## 🕳️ 避坑指南（本项目踩过的坑都在这）
 
-1. **通知在后台线程构建** → `NotificationContent.CreateTwoIconsMask` 内部会 `new LucideIconSource`（Avalonia 对象），
-   在轮询线程构造会抛 `Call from invalid thread`，导致提醒发不出去。现在整个 `NotificationRequest` 都在 UI 线程构建。
-2. **今天课表的解析方式错了** → 不能直接查 `Profile.OrderedSchedules`（正常日子那里是空的）。
-   正确做法是 `ILessonsService.GetClassPlanByDate(today, out var id)`，它按
-   「预定课表 → 临时课表 → 课表组/时间规则匹配」的顺序选出当天课表。
+### 1. 通知对象必须在 UI 线程构建
+
+`NotificationContent.CreateTwoIconsMask` 内部会 `new LucideIconSource`（Avalonia 对象），
+在轮询线程构造会抛 `Call from invalid thread`，提醒直接发不出去。
+**修法**：整个 `NotificationRequest` 都投递到 `Dispatcher.UIThread` 构建。
+
+### 2. 「今天该用哪张课表」不能查 OrderedSchedules
+
+`Profile.OrderedSchedules` 只存「某天临时指定用哪张课表」，正常日子是空的。
+**修法**：`ILessonsService.GetClassPlanByDate(today, out var id)`，它按
+「预定课表 → 临时课表 → 课表组/时间规则匹配」选出当天课表。
+
+### 3. ⚠️ 修改课表也必须在 UI 线程（v1.2.0 排掉的雷）
+
+`CreateTempClassPlan()` 会写 `Profile.OverlayClassPlanId`，而 ClassIsland 的课表网格
+（`ScheduleDataGrid`）订阅了 `Profile` 的变化；在后台线程改课表会触发 UI 控件属性读取，
+抛 `Call from invalid thread`，异常还会被上层 catch 吞掉 —— 表现为「大屏毫无反应」。
+
+**修法**：把 `CreateTempClassPlan` / `Classes[i].SubjectId = ...` / `SaveProfile()` 整段放进
+`Dispatcher.UIThread.InvokeAsync(...)` 执行；并且**执行失败必须弹提醒 + 写日志**，不能静默吞掉。
+
+### 4. 关键词闸门会挡掉自然语言
+
+老师发「今天第三节课不上了，让数学老师来上」时不包含 `#调课`，如果入口先按关键词过滤，
+AI 永远看不到这条消息。
+**修法**：AI 开启时用「意图预筛」（调课/换课/代课/不上/来上/换成…）作为第二入口；
+不属于指令也像闲聊的消息保持静默，不刷屏提示格式错误。
 
 ## 已验证 / 待验证
 
 已验证（真机 + 日志证据）：
 
-- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,1.1.0.0)`
+- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,1.2.0.0)`
 - 提醒提供方注册：`注册提醒提供方：b7f3c1a2-...（QQ 调课同步）`
 - 后台启动 + 权限：`QQ 调课同步已启动（间隔 1s…）`、`通知监听权限：Allowed`
 - 探针在真实 QQ 群消息上抓到 Toast（群名 + 发送者：内容）
 - **真实私聊 `#调课 第3节 语文改数学` → 大屏弹「调课已同步」+ 课表即时变更**
-- 设置页打开无绑定错误；「撤销今天的调课」按钮恢复原课表（v1.0 实测）\n- v1.1.0：单节撤销逻辑单测 8 条通过；设置页新增「撤销单节课」行渲染正常
+- 设置页打开无绑定错误；「撤销今天的调课」按钮恢复原课表
+- **v1.2.0 真机实测（老师自然语言）**：发「今天第三节课不上了，让数学老师来上」→
+  秒弹「AI 调课（待确认）」→ 回 `#确认` → 课表第 3 节变为数学、课表名出现「（临时层）」
 
 ## 单节课精准撤销（v1.1.0）
 

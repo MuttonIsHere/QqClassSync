@@ -24,6 +24,20 @@ public sealed class TiaokeParser
     // 撤销指令的触发词。注意「#撤销调课」里并不包含「#调课」，所以要单独识别。
     private static readonly string[] UndoTokens = ["#撤销调课", "#取消调课", "撤销调课", "取消调课", "撤销换课"];
 
+    // 待确认 AI 调课的操作词（只有存在待确认结果时才有意义）。
+    private static readonly string[] ConfirmTokens = ["#确认", "#应用"];
+    private static readonly string[] AcceptDropTokens = ["#放弃"];
+
+    /// <summary>是否为「确认应用待处理调课」。</summary>
+    public static bool IsConfirmText(string text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && ConfirmTokens.Any(token => text.Contains(token, StringComparison.Ordinal));
+
+    /// <summary>是否为「放弃待处理调课」。</summary>
+    public static bool IsDropText(string text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && AcceptDropTokens.Any(token => text.Contains(token, StringComparison.Ordinal));
+
     /// <summary>
     /// 这条文本是否像是给我们插件的指令（决定要不要进解析流程）。
     /// </summary>
@@ -35,6 +49,11 @@ public sealed class TiaokeParser
         }
 
         if (!string.IsNullOrWhiteSpace(keyword) && text.Contains(keyword, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (IsConfirmText(text) || IsDropText(text))
         {
             return true;
         }

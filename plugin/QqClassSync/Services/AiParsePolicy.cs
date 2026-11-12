@@ -11,6 +11,22 @@ public static class AiParsePolicy
     public const string DefaultBaseUrl = "https://api.deepseek.com/v1";
 
     /// <summary>
+    /// 便宜的「意图预筛」：只有像调课的消息才值得送进大模型，避免把整群闲聊都发出去。
+    /// 命中任意一个词才继续；宁可漏判（回退正则/忽略），也不要滥发。
+    /// </summary>
+    private static readonly string[] IntentHints =
+    [
+        "调课", "换课", "代课", "改课", "调到", "换到", "换成", "改成",
+        "不上", "来上", "来代", "来教", "顶课", "代上",
+        "调一下", "换一下", "这节课", "上一节"
+    ];
+
+    /// <summary>这条消息看起来像不像「调课意图」（用于决定要不要调用 AI）。</summary>
+    public static bool LooksLikeIntent(string? text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && IntentHints.Any(hint => text.Contains(hint, StringComparison.Ordinal));
+
+    /// <summary>
     /// 只有「开关打开 + API Key 非空 + BaseUrl 非空」三者同时满足，才认为 AI 解析可用。
     /// </summary>
     public static bool IsConfigured(bool enabled, string? apiKey, string? baseUrl) =>

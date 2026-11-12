@@ -43,6 +43,14 @@ internal static class Program
         _failed += AiParsePolicyTests.Run();
 
         Console.WriteLine();
+        Console.WriteLine("=== AI 返回内容解析 ===");
+        _failed += AiResponseParserTests.Run();
+
+        Console.WriteLine();
+        Console.WriteLine("=== AI HTTP 调用（本地假服务器） ===");
+        _failed += AiHttpIntegrationTests.Run();
+
+        Console.WriteLine();
         Console.WriteLine(_failed == 0 ? "全部用例通过" : $"有 {_failed} 个用例失败");
         return _failed == 0 ? 0 : 1;
     }

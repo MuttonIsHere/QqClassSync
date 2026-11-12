@@ -37,6 +37,7 @@ public sealed class TempClassPlanPatcher(
         var plan = lessonsService.GetClassPlanByDate(today, out var planId);
         if (plan is null || planId is null)
         {
+            logger.LogWarning("今天没有生效的课表，无法调课。");
             return PatchOutcome.Fail("今天没有生效的课表，无法调课");
         }
 
@@ -45,6 +46,7 @@ public sealed class TempClassPlanPatcher(
             var overlayId = profileService.CreateTempClassPlan(planId.Value);
             if (overlayId is null)
             {
+                logger.LogWarning("创建临时层课表失败（今天可能已有临时层），源课表 ID={PlanId}", planId);
                 return PatchOutcome.Fail("创建临时层课表失败（可能今天已经有临时层）");
             }
 
@@ -55,6 +57,7 @@ public sealed class TempClassPlanPatcher(
 
         if (command.Lesson > plan.Classes.Count)
         {
+            logger.LogWarning("第 {Lesson} 节超出今天课表范围（共 {Count} 节）", command.Lesson, plan.Classes.Count);
             return PatchOutcome.Fail($"第 {command.Lesson} 节超出今天课表范围（共 {plan.Classes.Count} 节）");
         }
 
@@ -70,6 +73,10 @@ public sealed class TempClassPlanPatcher(
                 .Select(s => s.Name)
                 .Where(n => !string.IsNullOrWhiteSpace(n))
                 .Take(12));
+            logger.LogWarning(
+                "课表里找不到科目「{Subject}」，无法调课。可用科目：{Available}",
+                command.ToSubject,
+                available);
             return PatchOutcome.Fail($"课表里找不到科目「{command.ToSubject}」。可用科目：{available}");
         }
 

@@ -35,6 +35,8 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private bool _warnedAboutAccess;
+    private TiaokeCommand? _pendingAiCommand;
+    private DateTime _pendingExpiresAt;
 
     public TiaokeNotificationProvider(
         TiaokeSettings settings,
@@ -64,7 +66,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         _logger.LogInformation(
             "AI 解析：{Status}",
             _aiParser.IsConfigured
-                ? "已配置（本版本尚未接入模型调用，仍走正则解析）"
+                ? "已配置（调用 /chat/completions，8 秒超时，失败自动回退正则）"
                 : "未启用或未填写 Key，使用正则解析（不会报错）");
     }
 
@@ -178,29 +180,53 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private async Task HandleToastAsync(ToastSnapshot toast, CancellationToken cancellationToken)
     {
         var text = toast.FullText;
-        if (!_parser.MentionsCommand(text, _settings.Keyword))
+
+        // 先处理「待确认 AI 调课」的操作词：#确认 应用、#放弃 取消。
+        if (TiaokeParser.IsConfirmText(text))
+        {
+            await ApplyPendingAiCommandAsync(cancellationToken);
+            return;
+        }
+
+        if (TiaokeParser.IsDropText(text))
+        {
+            if (_pendingAiCommand is not null)
+            {
+                _pendingAiCommand = null;
+                Show("QQ 调课", "已放弃待确认的 AI 调课");
+            }
+
+            return;
+        }
+
+        // 入口闸门：
+        //   - 命中关键词/撤销词 → 走正则（快、免费）；
+        //   - AI 已配置且消息像调课意图（如「今天第三节课不上了，让数学老师来上」）→ 允许进入 AI。
+        var mentionsCommand = _parser.MentionsCommand(text, _settings.Keyword);
+        var aiCandidate = _aiParser.IsConfigured && AiParsePolicy.LooksLikeIntent(text);
+        if (!mentionsCommand && !aiCandidate)
         {
             return;
         }
 
         // 先用正则：命中就结束（快、免费、离线可靠）。
-        // 没命中且 AI 已配置时，才尝试 AI 模糊解析；AI 不可用/失败会返回 null，自动回退。
+        // 没命中且 AI 候选时，才尝试 AI 模糊解析；AI 不可用/失败会返回 null，自动回退。
         var parse = _parser.Parse(text, _settings.Keyword);
         var fromAi = false;
-        if (!parse.Success)
+        if (!parse.Success && aiCandidate)
         {
             var aiResult = await _aiParser.TryParseAsync(text, cancellationToken);
             if (aiResult is { Success: true })
             {
                 parse = aiResult;
                 fromAi = true;
-                _logger.LogInformation("AI 解析命中：{Command}", aiResult.Command);
             }
         }
 
         if (!parse.Success)
         {
-            if (_settings.NotifyOnParseFailure)
+            // 只有「明确发了指令词」的消息才提示格式错误；闲聊类消息保持安静。
+            if (mentionsCommand && _settings.NotifyOnParseFailure)
             {
                 Show("QQ 调课", $"收到一条调课消息，但{parse.Reason}");
             }
@@ -217,21 +243,50 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             return;
         }
 
-        // AI 解析的结果默认要先确认（防误判/防把闲聊当调课）。
+        // AI 解析的结果默认要先确认（防误判/防把闲聊当调课）：先挂起，等老师发「#确认」再由下面应用。
         if (fromAi && _settings.AiConfirmBeforeSend)
         {
-            Show("AI 调课（待确认）", $"解析到 {command}，请到设置页确认后再执行");
+            _pendingAiCommand = command;
+            _pendingExpiresAt = DateTime.Now.AddMinutes(10);
+            Show("AI 调课（待确认）",
+                $"检测到 AI 解析调课：{command}，是否应用？回复 #确认 应用，或回复 #放弃 取消（10 分钟内有效）");
             return;
         }
 
-        var isUndo = command.Kind == TiaokeCommandKind.Undo;
-        var outcome = isUndo
-            ? command.Lesson > 0
-                ? _patcher.UndoLesson(command.Lesson)
-                : _patcher.Undo()
-            : _patcher.Apply(command);
+        await ApplyCommandAndNotifyAsync(command, cancellationToken);
+    }
 
-        var title = (isUndo, outcome.Applied) switch
+    /// <summary>
+    /// 执行调课/撤销并弹出结果提醒。返回是否成功执行（异常时返回 false，便于保留待确认状态）。
+    ///
+    /// 注意：必须在 UI 线程执行。CreateTempClassPlan() 会修改 Profile.OverlayClassPlanId，
+    /// 触发 ClassIsland 课表网格（Avalonia 控件）的响应式刷新；在后台线程调用会抛
+    /// "Call from invalid thread"。
+    /// </summary>
+    private async Task<bool> ApplyCommandAndNotifyAsync(TiaokeCommand command, CancellationToken cancellationToken)
+    {
+        PatchOutcome outcome;
+        try
+        {
+            outcome = await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                var isUndo = command.Kind == TiaokeCommandKind.Undo;
+                return isUndo
+                    ? command.Lesson > 0
+                        ? _patcher.UndoLesson(command.Lesson)
+                        : _patcher.Undo()
+                    : _patcher.Apply(command);
+            });
+        }
+        catch (Exception ex)
+        {
+            // 不再静默：日志写清楚，提醒也告诉用户去看日志。
+            _logger.LogWarning(ex, "执行调课失败（{Command}）", command);
+            Show("调课失败", $"{command}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
+            return false;
+        }
+
+        var title = (command.Kind == TiaokeCommandKind.Undo, outcome.Applied) switch
         {
             (true, true) => "调课已撤销",
             (true, false) => "撤销失败",
@@ -240,6 +295,32 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         };
 
         Show(title, $"{command}：{outcome.Message}");
+        return outcome.Applied;
+    }
+
+    /// <summary>
+    /// 处理「#确认」：应用挂起的 AI 调课。执行失败时保留待确认状态，允许重试。
+    /// </summary>
+    private async Task ApplyPendingAiCommandAsync(CancellationToken cancellationToken)
+    {
+        if (_pendingAiCommand is not { } command)
+        {
+            Show("QQ 调课", "当前没有待确认的调课");
+            return;
+        }
+
+        if (DateTime.Now > _pendingExpiresAt)
+        {
+            _pendingAiCommand = null;
+            Show("QQ 调课", "待确认的调课已过期（超过 10 分钟），请重新发送");
+            return;
+        }
+
+        var applied = await ApplyCommandAndNotifyAsync(command, cancellationToken);
+        if (applied || _pendingAiCommand is null)
+        {
+            _pendingAiCommand = null;
+        }
     }
 
     private void Show(string title, string body)
