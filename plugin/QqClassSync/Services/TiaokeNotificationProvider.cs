@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Avalonia.Threading;
 using ClassIsland.Core.Abstractions.Services.NotificationProviders;
 using ClassIsland.Core.Attributes;
@@ -37,6 +38,10 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private bool _warnedAboutAccess;
     private TiaokeCommand? _pendingAiCommand;
     private DateTime _pendingExpiresAt;
+    private string _pendingSource = "QQ";
+
+    /// <summary>其它插件（如「小橙看班联动」）转发进来的消息队列。</summary>
+    private readonly ConcurrentQueue<(string Text, string Source)> _externalInbox = new();
 
     public TiaokeNotificationProvider(
         TiaokeSettings settings,
@@ -52,6 +57,9 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         _aiParser = aiParser;
         _patcher = patcher;
         _logger = logger;
+
+        // 让其它插件能通过反射找到本插件并投递消息（见 Bridge/TiaokeBridge.cs）。
+        Bridge.TiaokeBridge.Provider = this;
 
         lock (_lifecycleLock)
         {
@@ -123,6 +131,29 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                 // 支持热更新配置：改了 Settings.json 无需重启 ClassIsland。
                 _settings.ReloadIfChanged();
 
+                if (!_settings.Enabled)
+                {
+                    // 监听关闭时丢弃外部消息，避免重新开启后处理一堆过期指令。
+                    while (_externalInbox.TryDequeue(out _))
+                    {
+                    }
+                }
+                else
+                {
+                    // 其它插件（如「小橙看班联动」）转发进来的消息：与 QQ 消息走同一套解析管线。
+                    while (_externalInbox.TryDequeue(out var external))
+                    {
+                        try
+                        {
+                            await HandleTextAsync(external.Text, external.Source, cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "处理外部消息失败（来源：{Source}）", external.Source);
+                        }
+                    }
+                }
+
                 if (_settings.Enabled)
                 {
                     var toasts = await _scanner.ScanAsync(cancellationToken);
@@ -179,8 +210,16 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
 
     private async Task HandleToastAsync(ToastSnapshot toast, CancellationToken cancellationToken)
     {
-        var text = toast.FullText;
+        await HandleTextAsync(toast.FullText, "QQ", cancellationToken);
+    }
 
+    /// <summary>
+    /// 处理一条文本（QQ Toast，或其它插件经 <see cref="Bridge.TiaokeBridge"/> 转发过来的消息）。
+    /// </summary>
+    /// <param name="text">消息正文。</param>
+    /// <param name="source">来源标签（QQ / 小橙看班 / …），用于提醒里标注来源。</param>
+    private async Task HandleTextAsync(string text, string source, CancellationToken cancellationToken)
+    {
         // 先处理「待确认 AI 调课」的操作词：#确认 应用、#放弃 取消。
         if (TiaokeParser.IsConfirmText(text))
         {
@@ -193,7 +232,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             if (_pendingAiCommand is not null)
             {
                 _pendingAiCommand = null;
-                Show("QQ 调课", "已放弃待确认的 AI 调课");
+                Show("调课待确认", $"{Prefix(source)}已放弃待确认的 AI 调课");
             }
 
             return;
@@ -228,18 +267,22 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             // 只有「明确发了指令词」的消息才提示格式错误；闲聊类消息保持安静。
             if (mentionsCommand && _settings.NotifyOnParseFailure)
             {
-                Show("QQ 调课", $"收到一条调课消息，但{parse.Reason}");
+                Show("调课解析失败", $"{Prefix(source)}收到一条调课消息，但{parse.Reason}");
             }
 
             return;
         }
 
         var command = parse.Command!;
-        _logger.LogInformation("解析到指令：{Command}（来源：{Source}）", command, fromAi ? "AI" : "正则");
+        _logger.LogInformation(
+            "解析到指令：{Command}（来源：{Parser} / {Source}）",
+            command,
+            fromAi ? "AI" : "正则",
+            source);
 
         if (!_settings.AutoApply)
         {
-            Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未执行");
+            Show("调课（预览）", $"{Prefix(source)}解析到 {command}，当前为干跑模式，未执行");
             return;
         }
 
@@ -247,13 +290,34 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         if (fromAi && _settings.AiConfirmBeforeSend)
         {
             _pendingAiCommand = command;
+            _pendingSource = source;
             _pendingExpiresAt = DateTime.Now.AddMinutes(10);
             Show("AI 调课（待确认）",
-                $"检测到 AI 解析调课：{command}，是否应用？回复 #确认 应用，或回复 #放弃 取消（10 分钟内有效）");
+                $"{Prefix(source)}检测到 AI 解析调课：{command}，是否应用？回复 #确认 应用，或回复 #放弃 取消（10 分钟内有效）");
             return;
         }
 
-        await ApplyCommandAndNotifyAsync(command, cancellationToken);
+        await ApplyCommandAndNotifyAsync(command, source, cancellationToken);
+    }
+
+    /// <summary>
+    /// 来源前缀：QQ 不显示，其它来源（如小橙看班）在提醒正文里标注，方便分辨消息从哪来。
+    /// </summary>
+    private static string Prefix(string source) =>
+        string.Equals(source, "QQ", StringComparison.OrdinalIgnoreCase) ? string.Empty : $"【来源：{source}】";
+
+    /// <summary>
+    /// 供其它插件投递消息（经 <see cref="Bridge.TiaokeBridge"/> 调用）。线程安全。
+    /// </summary>
+    public bool SubmitExternal(string? text, string? source)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        _externalInbox.Enqueue((text, string.IsNullOrWhiteSpace(source) ? "外部" : source!));
+        return true;
     }
 
     /// <summary>
@@ -263,7 +327,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     /// 触发 ClassIsland 课表网格（Avalonia 控件）的响应式刷新；在后台线程调用会抛
     /// "Call from invalid thread"。
     /// </summary>
-    private async Task<bool> ApplyCommandAndNotifyAsync(TiaokeCommand command, CancellationToken cancellationToken)
+    private async Task<bool> ApplyCommandAndNotifyAsync(TiaokeCommand command, string source, CancellationToken cancellationToken)
     {
         PatchOutcome outcome;
         try
@@ -281,8 +345,8 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         catch (Exception ex)
         {
             // 不再静默：日志写清楚，提醒也告诉用户去看日志。
-            _logger.LogWarning(ex, "执行调课失败（{Command}）", command);
-            Show("调课失败", $"{command}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
+            _logger.LogWarning(ex, "执行调课失败（{Command} / {Source}）", command, source);
+            Show("调课失败", $"{Prefix(source)}{command}：执行时出错（{ex.GetType().Name}），详情见 ClassIsland 日志");
             return false;
         }
 
@@ -294,7 +358,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
             _ => "调课失败"
         };
 
-        Show(title, $"{command}：{outcome.Message}");
+        Show(title, $"{Prefix(source)}{command}：{outcome.Message}");
         return outcome.Applied;
     }
 
@@ -305,18 +369,18 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     {
         if (_pendingAiCommand is not { } command)
         {
-            Show("QQ 调课", "当前没有待确认的调课");
+            Show("调课待确认", "当前没有待确认的调课");
             return;
         }
 
         if (DateTime.Now > _pendingExpiresAt)
         {
             _pendingAiCommand = null;
-            Show("QQ 调课", "待确认的调课已过期（超过 10 分钟），请重新发送");
+            Show("调课待确认", "待确认的调课已过期（超过 10 分钟），请重新发送");
             return;
         }
 
-        var applied = await ApplyCommandAndNotifyAsync(command, cancellationToken);
+        var applied = await ApplyCommandAndNotifyAsync(command, _pendingSource, cancellationToken);
         if (applied || _pendingAiCommand is null)
         {
             _pendingAiCommand = null;
