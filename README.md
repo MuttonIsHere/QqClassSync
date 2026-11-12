@@ -78,11 +78,13 @@ dotnet run --project qq-sync/spike/QqNotifyProbe -- 40
 ```
 plugin/QqClassSync/
 ├── Plugin.cs                          [PluginEntrance] 注册服务
-├── Services/TiaokeParser.cs           解析「#调课 第X节 A改B」（支持中文数字）
+├── Services/TiaokeParser.cs           解析「#调课 第X节 A改B」与「#撤销调课 [第X节]」
 ├── Services/QqToastScanner.cs         轮询通知中心 → 筛 QQ → 去重
-├── Services/TempClassPlanPatcher.cs   打临时层课表补丁
+├── Services/TempClassPlanPatcher.cs   打临时层课表补丁 / 整天撤销 / 单节撤销
+├── Services/LessonUndoJournal.cs      调课改动日志（单节撤销的数据基础）
 ├── Services/TiaokeNotificationProvider.cs  提醒提供方 + 后台循环
 ├── Services/TiaokeSettings.cs         设置（Settings.json）
+├── Views/TiaokeSettingsPage.axaml     设置页
 └── manifest.yml
 ```
 
@@ -135,12 +137,45 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 
 已验证（真机 + 日志证据）：
 
-- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,1.0.0.0)`
+- 插件被 ClassIsland 2.1.0.1 加载：`QQ 调课同步(qq.classsync,1.1.0.0)`
 - 提醒提供方注册：`注册提醒提供方：b7f3c1a2-...（QQ 调课同步）`
 - 后台启动 + 权限：`QQ 调课同步已启动（间隔 1s…）`、`通知监听权限：Allowed`
 - 探针在真实 QQ 群消息上抓到 Toast（群名 + 发送者：内容）
 - **真实私聊 `#调课 第3节 语文改数学` → 大屏弹「调课已同步」+ 课表即时变更**
-- 设置页打开无绑定错误；「撤销今天的调课」按钮恢复原课表
+- 设置页打开无绑定错误；「撤销今天的调课」按钮恢复原课表（v1.0 实测）\n- v1.1.0：单节撤销逻辑单测 8 条通过；设置页新增「撤销单节课」行渲染正常
+
+## 单节课精准撤销（v1.1.0）
+
+`ClearTempClassPlan()` 只能整天清空，所以插件自己维护了一份**调课改动日志**
+（`TempPatches.json`，与 `Settings.json` 同目录）：
+
+```json
+{
+  "Records": [
+    {
+      "Date": "2026-11-12",
+      "Lesson": 3,
+      "OriginalSubjectId": "…",
+      "OriginalSubjectName": "语文",
+      "NewSubjectId": "…",
+      "NewSubjectName": "数学",
+      "CreatedAt": "2026-11-12T19:50:00"
+    }
+  ]
+}
+```
+
+撤销逻辑：
+
+1. 收到 `#撤销调课 第3节`（或设置页「撤销这一节」）
+2. 从日志里取出该节**最近一条**记录（栈式：同一节改过两次就先撤最近一次）
+3. 把该节 `SubjectId` 写回原科目，`IsChangedClass = false`，`SaveProfile()`
+4. 其他节次的调课**保持不变**
+5. 如果所有节次都已和源课表一致 → 顺手调用 `ClearTempClassPlan()`，避免课表名一直挂着「（临时层）」
+
+> 日志里没有记录时（日志被清空/插件重装），会退回到「临时层的源课表」读取原科目，保证仍能撤销。
+
+单元测试见 [tests/ParserTests/JournalTests.cs](tests/ParserTests/JournalTests.cs)（栈式撤销、持久化、过期清理等 8 条用例）。
 
 ## 使用方法
 
@@ -149,15 +184,17 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 ```
 #调课 第3节 语文改数学
 #调课 第五节 化学换成生物
-#撤销调课
+#撤销调课 第3节      ← 只撤销这一节，其他调课保留
+#撤销调课            ← 撤销今天全部调课
 ```
 
 - 支持中文数字与 `改 / 改成 / 换成 / 改为 / 换为` 等写法
-- 撤销是**整天级别**（`ClearTempClassPlan()` 只能整天清），也可以在设置页点按钮
+- 设置页也能操作：「撤销这一节」（填节次）与「撤销全部」
 - QQ 窗口在前台时通常不弹 Toast，测试时建议从手机发送
 
 ## 已知限制
 
 - `NotificationChanged` 事件需要包身份，插件采用 1 秒轮询；轮询有 512 条去重窗口。
 - 权限绑定宿主进程：若 ClassIsland 侧被拒，`Allowed` 会失败并弹一次提示。
-- 当前没有设置页（改 `Settings.json` 即可）；后续可换 `PluginSettings` 基类做 UI。
+- 单节课撤销依赖改动日志：日志文件被删后只能退回到「源课表」整体还原该节。
+- 模糊指令（自然语言 → JSON）尚未实现，计划接入大模型解析（需要 API Key 与隐私开关）。

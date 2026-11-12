@@ -102,6 +102,28 @@ public partial class TiaokeSettingsPage : SettingsPageBase
         RefreshPlanStatus();
     }
 
+    private void OnUndoLessonClick(object? sender, RoutedEventArgs e)
+    {
+        if (!int.TryParse(LessonInput.Text?.Trim(), out var lesson) || lesson <= 0)
+        {
+            UndoStatusText.Text = "请输入有效的节次（例如 3）";
+            return;
+        }
+
+        try
+        {
+            var patcher = IAppHost.GetService<TempClassPlanPatcher>();
+            var outcome = patcher.UndoLesson(lesson);
+            UndoStatusText.Text = outcome.Message;
+        }
+        catch (Exception ex)
+        {
+            UndoStatusText.Text = "撤销失败：" + ex.Message;
+        }
+
+        RefreshPlanStatus();
+    }
+
     private void RefreshPlanStatus()
     {
         try
