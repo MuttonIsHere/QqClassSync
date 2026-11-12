@@ -49,6 +49,9 @@ public sealed class TiaokeSettings
     [JsonIgnore]
     public string FilePath { get; private set; } = string.Empty;
 
+    [JsonIgnore]
+    private DateTime _lastLoadedWriteTimeUtc = DateTime.MinValue;
+
     public static TiaokeSettings Load(string configFolder)
     {
         var path = Path.Combine(configFolder, "Settings.json");
@@ -77,6 +80,51 @@ public sealed class TiaokeSettings
         return settings;
     }
 
+    /// <summary>
+    /// 设置文件被外部修改后自动重载（轮询循环里调用），这样联调时改 Settings.json 不用重启 ClassIsland。
+    /// </summary>
+    public void ReloadIfChanged()
+    {
+        if (string.IsNullOrWhiteSpace(FilePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var info = new FileInfo(FilePath);
+            if (!info.Exists || info.LastWriteTimeUtc <= _lastLoadedWriteTimeUtc)
+            {
+                return;
+            }
+
+            var loaded = JsonSerializer.Deserialize<TiaokeSettings>(File.ReadAllText(FilePath), JsonOptions);
+            if (loaded is null)
+            {
+                return;
+            }
+
+            loaded.Normalize();
+            CopyFrom(loaded);
+            _lastLoadedWriteTimeUtc = info.LastWriteTimeUtc;
+        }
+        catch
+        {
+            // 文件正在被写入时可能读到半截内容，忽略这次，下一轮再试。
+        }
+    }
+
+    private void CopyFrom(TiaokeSettings other)
+    {
+        Enabled = other.Enabled;
+        Keyword = other.Keyword;
+        ScanIntervalSeconds = other.ScanIntervalSeconds;
+        AutoApply = other.AutoApply;
+        NotifyOnParseFailure = other.NotifyOnParseFailure;
+        AllowedAppNames = other.AllowedAppNames;
+        AllowedAppIds = other.AllowedAppIds;
+    }
+
     public void Normalize()
     {
         if (string.IsNullOrWhiteSpace(Keyword))
@@ -101,5 +149,6 @@ public sealed class TiaokeSettings
         }
 
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
+        _lastLoadedWriteTimeUtc = new FileInfo(FilePath).LastWriteTimeUtc;
     }
 }

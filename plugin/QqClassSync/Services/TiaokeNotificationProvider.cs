@@ -13,41 +13,55 @@ namespace QqClassSync.Services;
 /// 提醒提供方 + 后台轮询宿主。
 /// 之所以继承 NotificationProviderBase：这样可以用 ShowNotification 把提醒推给 ClassIsland
 /// 的提醒渠道（大屏/遮罩/语音都走宿主既有配置），而不是自己造一套弹窗。
+///
+/// 生命周期说明：宿主按 IHostedService 顺序启动，实测有其它插件在 StartAsync 里抛异常，
+/// 会让后续服务直接不启动。所以轮询循环在构造函数里就起，不依赖宿主调用 StartAsync。
 /// </summary>
 [NotificationProviderInfo(
     "b7f3c1a2-5d4e-4f6a-9b8c-0d1e2f3a4b5c",
     "QQ 调课同步",
     "\uE02B",
     "监听 QQ 群聊中的「#调课」消息，自动修改临时层课表并提醒。")]
-public sealed class TiaokeNotificationProvider(
-    TiaokeSettings settings,
-    QqToastScanner scanner,
-    TiaokeParser parser,
-    TempClassPlanPatcher patcher,
-    ILogger<TiaokeNotificationProvider> logger) : NotificationProviderBase, IHostedService
+public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHostedService
 {
+    private readonly TiaokeSettings _settings;
+    private readonly QqToastScanner _scanner;
+    private readonly TiaokeParser _parser;
+    private readonly TempClassPlanPatcher _patcher;
+    private readonly ILogger<TiaokeNotificationProvider> _logger;
+
     private readonly object _lifecycleLock = new();
     private CancellationTokenSource? _cts;
     private Task? _loop;
     private bool _warnedAboutAccess;
 
-    Task IHostedService.StartAsync(CancellationToken cancellationToken)
+    public TiaokeNotificationProvider(
+        TiaokeSettings settings,
+        QqToastScanner scanner,
+        TiaokeParser parser,
+        TempClassPlanPatcher patcher,
+        ILogger<TiaokeNotificationProvider> logger)
     {
+        _settings = settings;
+        _scanner = scanner;
+        _parser = parser;
+        _patcher = patcher;
+        _logger = logger;
+
         lock (_lifecycleLock)
         {
-            if (_loop is { IsCompleted: false })
-            {
-                return Task.CompletedTask;
-            }
-
-            _cts?.Dispose();
-            _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _cts = new CancellationTokenSource();
             _loop = Task.Run(() => RunAsync(_cts.Token), CancellationToken.None);
         }
 
-        logger.LogInformation(
+        _logger.LogInformation(
             "QQ 调课同步已启动（间隔 {Interval}s，关键词 {Keyword}，自动应用 {AutoApply}）",
             settings.ScanIntervalSeconds, settings.Keyword, settings.AutoApply);
+    }
+
+    Task IHostedService.StartAsync(CancellationToken cancellationToken)
+    {
+        // 构造函数里已经启动；这里只做幂等确认。
         return Task.CompletedTask;
     }
 
@@ -66,7 +80,7 @@ public sealed class TiaokeNotificationProvider(
             return;
         }
 
-        logger.LogInformation("QQ 调课同步正在停止…");
+        _logger.LogInformation("QQ 调课同步正在停止…");
         await cts.CancelAsync();
         try
         {
@@ -95,11 +109,14 @@ public sealed class TiaokeNotificationProvider(
         {
             try
             {
-                if (settings.Enabled)
-                {
-                    var toasts = await scanner.ScanAsync(cancellationToken);
+                // 支持热更新配置：改了 Settings.json 无需重启 ClassIsland。
+                _settings.ReloadIfChanged();
 
-                    if (scanner.AccessStatus != UserNotificationListenerAccessStatus.Allowed
+                if (_settings.Enabled)
+                {
+                    var toasts = await _scanner.ScanAsync(cancellationToken);
+
+                    if (_scanner.AccessStatus != UserNotificationListenerAccessStatus.Allowed
                         && !_warnedAboutAccess)
                     {
                         _warnedAboutAccess = true;
@@ -122,13 +139,13 @@ public sealed class TiaokeNotificationProvider(
             catch (Exception ex)
             {
                 failures++;
-                logger.LogWarning(ex, "调课同步轮询失败（连续 {Failures} 次）", failures);
+                _logger.LogWarning(ex, "调课同步轮询失败（连续 {Failures} 次）", failures);
             }
 
             // 连续失败时退避，避免刷屏；成功后恢复用户配置的间隔。
             var delay = failures > 0
                 ? TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(failures, 5)))
-                : TimeSpan.FromSeconds(settings.ScanIntervalSeconds);
+                : TimeSpan.FromSeconds(_settings.ScanIntervalSeconds);
 
             try
             {
@@ -144,15 +161,15 @@ public sealed class TiaokeNotificationProvider(
     private void HandleToast(ToastSnapshot toast)
     {
         var text = toast.FullText;
-        if (!text.Contains(settings.Keyword, StringComparison.Ordinal))
+        if (!text.Contains(_settings.Keyword, StringComparison.Ordinal))
         {
             return;
         }
 
-        var parse = parser.Parse(text, settings.Keyword);
+        var parse = _parser.Parse(text, _settings.Keyword);
         if (!parse.Success)
         {
-            if (settings.NotifyOnParseFailure)
+            if (_settings.NotifyOnParseFailure)
             {
                 Show("QQ 调课", $"收到一条调课消息，但{parse.Reason}");
             }
@@ -161,13 +178,13 @@ public sealed class TiaokeNotificationProvider(
         }
 
         var command = parse.Command!;
-        if (!settings.AutoApply)
+        if (!_settings.AutoApply)
         {
             Show("QQ 调课（预览）", $"解析到 {command}，当前为干跑模式，未修改课表");
             return;
         }
 
-        var outcome = patcher.Apply(command);
+        var outcome = _patcher.Apply(command);
         Show(outcome.Applied ? "调课已同步" : "调课失败", $"{command}：{outcome.Message}");
     }
 
