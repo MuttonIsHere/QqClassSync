@@ -1,8 +1,11 @@
 id: qq.classsync
 name: QQ 调课同步
-description: 监听 QQ 群聊里的「#调课」消息，自动打临时课表补丁并弹 ClassIsland 提醒。
+description: 监听 QQ 群聊/私聊里的「#调课」消息，自动打临时课表补丁并弹 ClassIsland 提醒。
 entranceAssembly: "QqClassSync.dll"
-url: "https://github.com/ClassIsland/ClassIsland"
+url: "https://github.com/MuttonIsHere/QqClassSync"
 apiVersion: 2.0.0.0
 version: 1.0.0.0
 author: 大肥鱼
+repoOwner: MuttonIsHere
+repoName: QqClassSync
+assetsRoot: main
