@@ -87,7 +87,7 @@ dotnet build -c Release -p:CreateCipx=true -p:PowershellBinaryName=powershell
 
 ```powershell
 Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
-  "C:\Users\36896\Desktop\old\ClassIsland_windows_x64_selfContained_folder_2.0.0.2_2\data\Plugins\QqClassSync\" -Force
+  "<ClassIsland 安装目录>\data\Plugins\QqClassSync\" -Force
 ```
 
 设置文件：`<ClassIsland>\data\Config\Plugins\qq.classsync\Settings.json`
