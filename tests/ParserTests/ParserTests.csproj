@@ -17,6 +17,9 @@
   <ItemGroup>
     <!-- 直接复用插件的源码，避免复制粘贴 -->
     <Compile Include="../../plugin/QqClassSync/Services/TiaokeParser.cs" Link="TiaokeParser.cs" />
+    <Compile Include="../../plugin/QqClassSync/Services/SubjectMatcher.cs" Link="SubjectMatcher.cs" />
+    <Compile Include="../../plugin/QqClassSync/Services/LessonTimeResolver.cs" Link="LessonTimeResolver.cs" />
+    <Compile Include="../../plugin/QqClassSync/Services/CommandValidator.cs" Link="CommandValidator.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/LessonUndoJournal.cs" Link="LessonUndoJournal.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/AiParsePolicy.cs" Link="AiParsePolicy.cs" />
     <Compile Include="../../plugin/QqClassSync/Services/AiResponseParser.cs" Link="AiResponseParser.cs" />

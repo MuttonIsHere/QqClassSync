@@ -14,7 +14,8 @@ internal static class JournalTests
         var dir = Path.Combine(AppContext.BaseDirectory, "journal-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         var path = Path.Combine(dir, "TempPatches.json");
-        var today = new DateTime(2026, 11, 12);
+        // 用当天日期：Load() 会按「今天」清理 7 天前的记录，写死日期会让用例随日期推移失效。
+        var today = DateTime.Today;
 
         try
         {

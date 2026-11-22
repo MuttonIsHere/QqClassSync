@@ -58,6 +58,10 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         _patcher = patcher;
         _logger = logger;
 
+        // AI 提示词里带上本校科目表（只含名称/简称/老师），把「道法」「电脑」这类说法归一。
+        // 每次调用现读档案，老师改完科目表不需要重启。
+        _aiParser.SubjectCatalogProvider = _patcher.GetSubjectCatalog;
+
         // 让其它插件能通过反射找到本插件并投递消息（见 Bridge/TiaokeBridge.cs）。
         Bridge.TiaokeBridge.Provider = this;
 
@@ -252,6 +256,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         // 没命中且 AI 候选时，才尝试 AI 模糊解析；AI 不可用/失败会返回 null，自动回退。
         var parse = _parser.Parse(text, _settings.Keyword);
         var fromAi = false;
+        string? aiFailureReason = null;
         if (!parse.Success && aiCandidate)
         {
             var aiResult = await _aiParser.TryParseAsync(text, cancellationToken);
@@ -260,10 +265,21 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
                 parse = aiResult;
                 fromAi = true;
             }
+            else if (aiResult is { Success: false } && !string.IsNullOrWhiteSpace(aiResult.Reason))
+            {
+                // AI 识别出了意图但无法安全落地（如「下午第3节和第5节互换」），把原因告诉老师。
+                aiFailureReason = aiResult.Reason;
+            }
         }
 
         if (!parse.Success)
         {
+            if (aiFailureReason is not null)
+            {
+                Show("AI 调课未执行", $"{Prefix(source)}{aiFailureReason}");
+                return;
+            }
+
             // 只有「明确发了指令词」的消息才提示格式错误；闲聊类消息保持安静。
             if (mentionsCommand && _settings.NotifyOnParseFailure)
             {
@@ -287,13 +303,17 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         }
 
         // AI 解析的结果默认要先确认（防误判/防把闲聊当调课）：先挂起，等老师发「#确认」再由下面应用。
-        if (fromAi && _settings.AiConfirmBeforeSend)
+        // 另外：模型自评置信度低或自报歧义时，即使设置里关了「发送前确认」，也必须确认一次。
+        if (fromAi && (_settings.AiConfirmBeforeSend || parse.NeedsConfirmation))
         {
             _pendingCommands = commands;
             _pendingSource = source;
             _pendingExpiresAt = DateTime.Now.AddMinutes(10);
+            var reason = parse.NeedsConfirmation && !string.IsNullOrWhiteSpace(parse.ConfirmationReason)
+                ? $"（{parse.ConfirmationReason}，请确认后再应用）"
+                : string.Empty;
             Show("AI 调课（待确认）",
-                $"{Prefix(source)}检测到批量调课：{Describe(commands)}。回复 #确认 应用全部，或回复 #放弃 取消（10 分钟内有效）");
+                $"{Prefix(source)}检测到批量调课：{Describe(commands)}。{reason}回复 #确认 应用全部，或回复 #放弃 取消（10 分钟内有效）");
             return;
         }
 

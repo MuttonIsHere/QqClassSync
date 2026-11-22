@@ -54,7 +54,7 @@ public static class AiParsePolicy
             return "Base URL 为空：自动回退到正则解析，不会报错";
         }
 
-        return $"已配置（{MaskKey(apiKey)}）：本版本仍走正则解析，模型调用将在后续版本接入";
+        return $"已配置（{MaskKey(apiKey)}）：调用 /chat/completions，8 秒超时，失败自动回退正则";
     }
 
     /// <summary>

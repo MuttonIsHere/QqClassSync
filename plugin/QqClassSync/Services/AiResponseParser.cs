@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace QqClassSync.Services;
 
@@ -7,6 +8,7 @@ namespace QqClassSync.Services;
 /// </summary>
 public static class AiResponseParser
 {
+    private static readonly Regex NumberToken = new("[0-9零〇一二两三四五六七八九十百]{1,3}", RegexOptions.Compiled);
     /// <summary>
     /// 从模型返回片段里解析调课意图列表。
     /// </summary>
@@ -168,15 +170,41 @@ public static class AiResponseParser
 
     private static AiParseOutcome? TryReadItem(JsonElement element)
     {
-        if (!TryGetProperty(element, "Lesson", out var lessonElement)
-            || !TryReadInt(lessonElement, out var lesson)
-            || lesson is < 1 or > 20)
+        // 兼容模型可能用的几种字段别名；优先级：标准字段 → 常见别名。
+        var lessonText = TryGetAnyProperty(element, out var lessonTextElement, "LessonText", "TimeText", "Time", "PeriodText", "Period")
+            ? ReadString(lessonTextElement).Trim()
+            : string.Empty;
+
+        var lesson = 0;
+        string? lessonFieldText = null;
+        var hasLesson = TryGetAnyProperty(element, out var lessonElement, "Lesson", "Period", "Index", "Jie")
+                        && TryReadInt(lessonElement, out lesson);
+        if (!hasLesson
+            && TryGetAnyProperty(element, out var rawLessonElement, "Lesson", "Period", "Index", "Jie"))
+        {
+            // 模型偶尔把整句时间写进 Lesson（"下午第二节"），当成 LessonText 用。
+            lessonFieldText = ReadString(rawLessonElement).Trim();
+        }
+
+        if (!hasLesson || lesson <= 0)
+        {
+            // 模型只给了「下午第二节」这类文本时，退一步从里面取数字（时段换算交给执行层）。
+            if (string.IsNullOrWhiteSpace(lessonText))
+            {
+                lessonText = lessonFieldText ?? string.Empty;
+            }
+
+            lesson = ExtractLeadingNumber(lessonText);
+        }
+
+        if (lesson is < 1 or > 20)
         {
             return null;
         }
 
         var swapWith = 0;
-        if (TryGetProperty(element, "SwapWith", out var swapElement) && TryReadInt(swapElement, out var swap))
+        if (TryGetAnyProperty(element, out var swapElement, "SwapWith", "Swap", "ExchangeWith")
+            && TryReadInt(swapElement, out var swap))
         {
             if (swap is >= 1 and <= 20 && swap != lesson)
             {
@@ -184,7 +212,7 @@ public static class AiResponseParser
             }
         }
 
-        var newSubject = TryGetProperty(element, "NewSubject", out var newElement)
+        var newSubject = TryGetAnyProperty(element, out var newElement, "NewSubject", "Subject", "To", "TargetSubject")
             ? ReadString(newElement).Trim()
             : string.Empty;
 
@@ -193,11 +221,61 @@ public static class AiResponseParser
             return null;
         }
 
-        var originalSubject = TryGetProperty(element, "OriginalSubject", out var originalElement)
+        var originalSubject = TryGetAnyProperty(element, out var originalElement, "OriginalSubject", "From", "OldSubject")
             ? ReadString(originalElement).Trim()
             : string.Empty;
 
-        return new AiParseOutcome(lesson, originalSubject, newSubject, swapWith);
+        // 置信度：缺省视为 1；模型偶尔给字符串（"0.8"），这里一并兼容并夹到 0~1。
+        var confidence = 1.0;
+        if (TryGetAnyProperty(element, out var confidenceElement, "Confidence", "Score")
+            && TryReadDouble(confidenceElement, out var parsedConfidence))
+        {
+            confidence = Math.Clamp(parsedConfidence, 0, 1);
+        }
+
+        var ambiguity = TryGetAnyProperty(element, out var ambiguityElement, "Ambiguity", "Uncertain", "Uncertainty", "Reason")
+            ? ReadString(ambiguityElement).Trim()
+            : string.Empty;
+
+        return new AiParseOutcome(lesson, originalSubject, newSubject, swapWith, confidence, ambiguity, lessonText);
+    }
+
+    /// <summary>从「下午第二节」这类文本里取第一个数字（中文/阿拉伯都支持）。</summary>
+    private static int ExtractLeadingNumber(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return 0;
+        }
+
+        // 只认带「节」或带时段的说法；避免把「14:30」这类时间当成第 14 节。
+        if (!text.Contains('节') && !LessonTimeResolver.TryParseDayPart(text, out _))
+        {
+            return 0;
+        }
+
+        var match = NumberToken.Match(text);
+        if (!match.Success)
+        {
+            return 0;
+        }
+
+        var parsed = TiaokeParser.ParseNumber(match.Value);
+        return parsed is >= 1 and <= 20 ? parsed.Value : 0;
+    }
+
+    private static bool TryGetAnyProperty(JsonElement element, out JsonElement value, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            if (TryGetProperty(element, name, out value))
+            {
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
@@ -226,6 +304,21 @@ public static class AiResponseParser
         };
     }
 
+    private static bool TryReadDouble(JsonElement element, out double value)
+    {
+        value = 0;
+        return element.ValueKind switch
+        {
+            JsonValueKind.Number => element.TryGetDouble(out value),
+            JsonValueKind.String => double.TryParse(
+                element.GetString(),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out value),
+            _ => false
+        };
+    }
+
     private static string ReadString(JsonElement element) => element.ValueKind switch
     {
         JsonValueKind.String => element.GetString() ?? string.Empty,
@@ -235,4 +328,18 @@ public static class AiResponseParser
 }
 
 /// <summary>模型解析出的一条调课意图（原科目可能为空；SwapWith &gt; 0 表示互换）。</summary>
-public sealed record AiParseOutcome(int Lesson, string OriginalSubject, string NewSubject, int SwapWith = 0);
+/// <param name="Lesson">全天节次（1-20）。</param>
+/// <param name="OriginalSubject">模型理解的原科目，可能为空。</param>
+/// <param name="NewSubject">目标科目（可能是老师的说法，执行前还要做一次确定性匹配）。</param>
+/// <param name="SwapWith">互换对端节次，0 表示不是互换。</param>
+/// <param name="Confidence">模型自评置信度 0-1；缺省视为 1。</param>
+/// <param name="Ambiguity">模型自报的歧义说明；非空时强制走「#确认」流程。</param>
+/// <param name="LessonText">模型看到的原始时间说法（如「下午第二节」），用于时段换算。</param>
+public sealed record AiParseOutcome(
+    int Lesson,
+    string OriginalSubject,
+    string NewSubject,
+    int SwapWith = 0,
+    double Confidence = 1,
+    string Ambiguity = "",
+    string LessonText = "");

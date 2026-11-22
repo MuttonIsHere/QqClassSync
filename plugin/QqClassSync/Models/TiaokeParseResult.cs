@@ -22,16 +22,18 @@ public enum TiaokeCommandKind
 /// <param name="ToSubject">目标科目名（撤销/互换为空）。</param>
 /// <param name="SwapWith">互换的对端节次（仅 Swap 有效）。</param>
 /// <param name="RawText">原始消息文本，用于提醒和排查。</param>
+/// <param name="DayPart">时段限定（上午/下午/中午/晚上，可为空）；执行前会换算成全天节次。</param>
 public sealed record TiaokeCommand(
     TiaokeCommandKind Kind,
     int Lesson,
     string FromSubject,
     string ToSubject,
     int SwapWith = 0,
-    string RawText = "")
+    string RawText = "",
+    string DayPart = "")
 {
-    public static TiaokeCommand Apply(int lesson, string from, string to, string raw) =>
-        new(TiaokeCommandKind.Apply, lesson, from, to, 0, raw);
+    public static TiaokeCommand Apply(int lesson, string from, string to, string raw, string dayPart = "") =>
+        new(TiaokeCommandKind.Apply, lesson, from, to, 0, raw, dayPart);
 
     public static TiaokeCommand Swap(int a, int b, string raw) =>
         new(TiaokeCommandKind.Swap, a, string.Empty, string.Empty, b, raw);
@@ -39,11 +41,15 @@ public sealed record TiaokeCommand(
     public static TiaokeCommand Undo(int lesson, string raw) =>
         new(TiaokeCommandKind.Undo, lesson, string.Empty, string.Empty, 0, raw);
 
+    /// <summary>给老师看的节次写法：带时段时显示「下午第2节」，避免和全天节次混淆。</summary>
+    public string LessonLabel =>
+        string.IsNullOrWhiteSpace(DayPart) ? $"第{Lesson}节" : $"{DayPart}第{Lesson}节";
+
     public override string ToString() => Kind switch
     {
         TiaokeCommandKind.Undo => Lesson > 0 ? $"撤销调课（第{Lesson}节）" : "撤销调课",
         TiaokeCommandKind.Swap => $"第{Lesson}节 ↔ 第{SwapWith}节 互换",
-        _ => $"第{Lesson}节 {FromSubject}→{ToSubject}"
+        _ => $"{LessonLabel} {FromSubject}→{ToSubject}"
     };
 }
 
@@ -52,6 +58,15 @@ public sealed record TiaokeCommand(
 /// </summary>
 public sealed record TiaokeParseResult(bool Success, IReadOnlyList<TiaokeCommand> Commands, string Reason)
 {
+    /// <summary>
+    /// 是否必须让老师再确认一次（AI 置信度低 / 模型自报歧义时为 true）。
+    /// 只是「建议确认」，真正的开关仍由设置页的「发送前确认」和调用方决定。
+    /// </summary>
+    public bool NeedsConfirmation { get; init; }
+
+    /// <summary>需要确认的原因（可直接显示给老师，不含 QQ 原文）。</summary>
+    public string ConfirmationReason { get; init; } = string.Empty;
+
     public static TiaokeParseResult Ok(IReadOnlyList<TiaokeCommand> commands) =>
         new(true, commands, string.Empty);
 

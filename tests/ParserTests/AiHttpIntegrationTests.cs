@@ -110,6 +110,63 @@ internal static class AiHttpIntegrationTests
             failed += Check(second is null && server.RequestCount == 1, "429 后进入冷却：第二次不再发请求");
         }
 
+        // 6) 低置信度 / 自报歧义 → NeedsConfirmation（即使设置里关了发送前确认）
+        const string LowConfidenceResponse =
+            "{\"choices\":[{\"message\":{\"content\":\"[{\\\"Lesson\\\":3,\\\"NewSubject\\\":\\\"数学\\\",\\\"Confidence\\\":0.55,\\\"Ambiguity\\\":\\\"节次不确定\\\"}]\"}}]}";
+        using (var server = new MockServer(LowConfidenceResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("第三节换一下吧", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(
+                result is { Success: true, NeedsConfirmation: true }
+                && result.ConfirmationReason.Contains("置信度"),
+                "低置信度 → 强制确认，并给出原因");
+        }
+
+        // 7) 时段信息传到命令（「下午第二节」→ DayPart=下午）
+        const string DayPartResponse =
+            "{\"choices\":[{\"message\":{\"content\":\"[{\\\"Lesson\\\":2,\\\"LessonText\\\":\\\"下午第二节\\\",\\\"NewSubject\\\":\\\"数学\\\",\\\"Confidence\\\":0.9}]\"}}]}";
+        using (var server = new MockServer(DayPartResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("下午第二节改数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(
+                result is { Success: true }
+                && result.Commands.Count == 1
+                && result.Commands[0].DayPart == "下午",
+                "「下午第二节」的时段传给执行层换算");
+        }
+
+        // 8) 带时段的互换 → 明确失败（不把下午第3节当全天第3节）
+        const string DayPartSwapResponse =
+            "{\"choices\":[{\"message\":{\"content\":\"[{\\\"Lesson\\\":3,\\\"SwapWith\\\":5,\\\"LessonText\\\":\\\"下午第3节\\\"}]\"}}]}";
+        using (var server = new MockServer(DayPartSwapResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("下午第3节和第5节互换", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(
+                result is { Success: false } && result.Reason.Contains("互换暂不支持"),
+                "带时段的互换 → 明确失败并说明原因");
+        }
+
         return failed;
     }
 

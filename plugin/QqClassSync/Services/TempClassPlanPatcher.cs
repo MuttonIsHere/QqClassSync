@@ -63,6 +63,38 @@ public sealed class TempClassPlanPatcher(
             return new BatchPatchOutcome(applied, failures);
         }
 
+        // 1) 时段换算 + 科目落点：都基于「源课表」做，临时层是它的副本，结果一致。
+        //    先算清楚每条指令要落到哪个科目，再决定要不要建临时层，
+        //    避免「科目写错 → 建了个空临时层 → 大屏一直挂着（临时层）却什么都没改」。
+        var candidates = BuildCandidates(profile);
+        var prepared = PrepareCommands(profile, plan, workItems, candidates, failures);
+        if (prepared.Count == 0)
+        {
+            if (failures.Count == 0)
+            {
+                failures.Add("没有可执行的调课指令");
+            }
+
+            return new BatchPatchOutcome(applied, failures);
+        }
+
+        // 2) 冲突/越界校验：有任何阻断项就整批不执行，避免写坏课表。
+        var snapshot = BuildSnapshot(profile, plan);
+        var issues = CommandValidator.Validate(prepared.Select(p => p.Command).ToList(), snapshot);
+        var blocks = issues.Where(i => i.Level == CommandIssueLevel.Block).ToList();
+        if (blocks.Count > 0)
+        {
+            failures.AddRange(blocks.Select(i => i.Message).Distinct(StringComparer.Ordinal));
+            TiaokeLog.Warn(logger, "调课指令存在冲突，已整批取消：{Reasons}", string.Join("；", blocks.Select(i => i.Message)));
+            return new BatchPatchOutcome(applied, failures);
+        }
+
+        foreach (var warning in issues.Where(i => i.Level == CommandIssueLevel.Warning))
+        {
+            TiaokeLog.Info(logger, "调课提示：{Message}", warning.Message);
+        }
+
+        // 3) 建临时层并执行（批量只落盘一次）。
         if (!plan.IsOverlay)
         {
             var overlayId = profileService.CreateTempClassPlan(planId.Value);
@@ -76,21 +108,20 @@ public sealed class TempClassPlanPatcher(
             TiaokeLog.Info(logger, "已为今天创建临时层课表：{PlanId}", overlayId);
         }
 
-        foreach (var command in workItems)
+        foreach (var item in prepared)
         {
-            if (command.Kind == TiaokeCommandKind.Swap)
+            if (item.Command.Kind == TiaokeCommandKind.Swap)
             {
-                ApplySwap(profile, plan, command, applied, failures);
+                ApplySwap(profile, plan, item.Command, applied, failures);
             }
             else
             {
-                ApplySingle(profile, plan, command, applied, failures);
+                ApplySingle(profile, plan, item, applied, failures);
             }
         }
 
         if (applied.Count > 0)
         {
-            // 批量只落盘一次。
             profileService.SaveProfile();
             journal.Save();
         }
@@ -98,13 +129,210 @@ public sealed class TempClassPlanPatcher(
         return new BatchPatchOutcome(applied, failures);
     }
 
-    private void ApplySingle(
+    /// <summary>执行前的准备结果：指令 + 已确定的科目落点（互换时为空）。</summary>
+    private sealed record PreparedCommand(
+        TiaokeCommand Command,
+        Guid TargetSubjectId,
+        string TargetSubjectName,
+        string MismatchNote);
+
+    /// <summary>
+    /// 执行前的准备：时段换算、科目落点、去重。任何一条无法唯一确定就跳过并记失败，
+    /// 不影响同一条消息里其他能确定的条目（部分成功）。
+    /// </summary>
+    private List<PreparedCommand> PrepareCommands(
+        Profile profile,
+        ClassPlan plan,
+        IReadOnlyList<TiaokeCommand> workItems,
+        IReadOnlyList<SubjectCandidate> candidates,
+        List<string> failures)
+    {
+        var slots = BuildSlots(plan);
+        var prepared = new List<PreparedCommand>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var original in workItems)
+        {
+            var command = original;
+
+            if (!string.IsNullOrWhiteSpace(command.DayPart))
+            {
+                var resolved = LessonTimeResolver.Resolve(command.Lesson, command.DayPart, slots);
+                if (!resolved.Success)
+                {
+                    failures.Add($"{command.DayPart}第{command.Lesson}节无法换算：{resolved.Reason}");
+                    TiaokeLog.Warn(logger,
+                        "时段换算失败：{Part}第{Lesson}节（{Reason}）",
+                        command.DayPart,
+                        command.Lesson,
+                        resolved.Reason);
+                    continue;
+                }
+
+                if (resolved.Lesson != command.Lesson)
+                {
+                    TiaokeLog.Info(logger,
+                        "时段换算：{Part}第{Lesson}节 → 全天第{Resolved}节",
+                        command.DayPart,
+                        command.Lesson,
+                        resolved.Lesson);
+                }
+
+                command = command with { Lesson = resolved.Lesson, DayPart = string.Empty };
+            }
+
+            if (command.Kind == TiaokeCommandKind.Swap)
+            {
+                var swapKey = $"S:{Math.Min(command.Lesson, command.SwapWith)}:{Math.Max(command.Lesson, command.SwapWith)}";
+                if (seen.Add(swapKey))
+                {
+                    prepared.Add(new PreparedCommand(command, Guid.Empty, string.Empty, string.Empty));
+                }
+
+                continue;
+            }
+
+            var match = SubjectMatcher.Resolve(command.ToSubject, candidates);
+            if (match.IsAmbiguous)
+            {
+                var names = string.Join("、", match.Candidates.Select(c => c.Name).Distinct(StringComparer.Ordinal));
+                TiaokeLog.Warn(logger,
+                    "第 {Lesson} 节的目标科目「{Subject}」有多个候选：{Candidates}，已跳过",
+                    command.Lesson,
+                    command.ToSubject,
+                    names);
+                failures.Add($"{command.LessonLabel}的目标科目「{command.ToSubject}」有多个候选：{names}；请改用完整科目名重发");
+                continue;
+            }
+
+            if (!match.IsUnique)
+            {
+                var reason = match.Detail;
+                if (!reason.Contains("地点", StringComparison.Ordinal))
+                {
+                    var available = string.Join("、", candidates
+                        .Select(c => c.Name)
+                        .Where(n => !string.IsNullOrWhiteSpace(n))
+                        .Take(12));
+                    reason = $"{reason}；可用科目：{available}";
+                }
+
+                TiaokeLog.Warn(logger, "第 {Lesson} 节无法确定目标科目：{Reason}", command.Lesson, reason);
+                failures.Add($"{command.LessonLabel}：{reason}");
+                continue;
+            }
+
+            var target = match.Match!;
+            var applyKey = $"A:{command.Lesson}:{target.Id}";
+            if (!seen.Add(applyKey))
+            {
+                continue;
+            }
+
+            prepared.Add(new PreparedCommand(
+                command,
+                target.Id,
+                target.Name,
+                BuildMismatchNote(profile, plan, command, candidates)));
+        }
+
+        return prepared;
+    }
+
+    /// <summary>
+    /// 原科目只用于提示：老师可能记错，但「换成什么」是明确的，不因此拒绝执行。
+    /// </summary>
+    private string BuildMismatchNote(
         Profile profile,
         ClassPlan plan,
         TiaokeCommand command,
+        IReadOnlyList<SubjectCandidate> candidates)
+    {
+        if (string.IsNullOrWhiteSpace(command.FromSubject)
+            || command.Lesson < 1
+            || command.Lesson > plan.Classes.Count)
+        {
+            return string.Empty;
+        }
+
+        var classInfo = plan.Classes[command.Lesson - 1];
+        var fromMatch = SubjectMatcher.Resolve(command.FromSubject, candidates);
+        if (!fromMatch.IsUnique || fromMatch.Match!.Id == classInfo.SubjectId)
+        {
+            return string.Empty;
+        }
+
+        var actualName = profile.Subjects.TryGetValue(classInfo.SubjectId, out var subject)
+            ? subject.Name ?? "(空)"
+            : "(空)";
+        TiaokeLog.Warn(logger,
+            "第 {Lesson} 节原科目不符：指令写的是 {From}，课表实际是 {Actual}（准备改为 {To}）",
+            command.Lesson,
+            fromMatch.Match!.Name,
+            actualName,
+            command.ToSubject);
+        return $"（注意：你说的是{fromMatch.Match!.Name}，课表实际是{actualName}）";
+    }
+
+    private static IReadOnlyList<LessonSlot> BuildSlots(ClassPlan plan)
+    {
+        var slots = new List<LessonSlot>();
+        var layout = plan.TimeLayout;
+        if (layout is null)
+        {
+            return slots;
+        }
+
+        var points = layout.Layouts
+            .Where(item => item.TimeType == 0)
+            .OrderBy(item => item.StartTime)
+            .ToList();
+
+        for (var i = 0; i < points.Count; i++)
+        {
+            slots.Add(new LessonSlot(i + 1, points[i].StartTime, points[i].EndTime));
+        }
+
+        return slots;
+    }
+
+    private static PlanSnapshot BuildSnapshot(Profile profile, ClassPlan plan)
+    {
+        var lessons = new List<PlanLessonInfo>(plan.Classes.Count);
+        for (var i = 0; i < plan.Classes.Count; i++)
+        {
+            var name = profile.Subjects.TryGetValue(plan.Classes[i].SubjectId, out var subject)
+                ? subject.Name ?? "(空)"
+                : "(空)";
+            lessons.Add(new PlanLessonInfo(i + 1, name));
+        }
+
+        return new PlanSnapshot(plan.Classes.Count, lessons);
+    }
+
+    private static List<SubjectCandidate> BuildCandidates(Profile profile) =>
+        profile.Subjects
+            .Select(pair => new SubjectCandidate(
+                pair.Key,
+                pair.Value.Name ?? string.Empty,
+                pair.Value.Initial ?? string.Empty,
+                pair.Value.TeacherName ?? string.Empty))
+            .Where(candidate => !string.IsNullOrWhiteSpace(candidate.Name))
+            .ToList();
+
+    /// <summary>
+    /// 给 AI 提示词用的科目表（只含名称/简称/老师）。每次调用现读档案，老师改了科目表立即生效。
+    /// </summary>
+    public IReadOnlyList<SubjectCandidate> GetSubjectCatalog() => BuildCandidates(profileService.Profile);
+
+    private void ApplySingle(
+        Profile profile,
+        ClassPlan plan,
+        PreparedCommand prepared,
         List<string> applied,
         List<string> failures)
     {
+        var command = prepared.Command;
         if (command.Lesson < 1 || command.Lesson > plan.Classes.Count)
         {
             failures.Add($"第{command.Lesson}节超出今天课表范围（共 {plan.Classes.Count} 节）");
@@ -116,25 +344,9 @@ public sealed class TempClassPlanPatcher(
             ? beforeSubject.Name
             : "(空)";
 
-        var target = FindSubject(profile, command.ToSubject);
-        if (target is null)
+        if (classInfo.SubjectId == prepared.TargetSubjectId)
         {
-            var available = string.Join("、", profile.Subjects.Values
-                .Select(s => s.Name)
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .Take(12));
-            TiaokeLog.Warn(logger, 
-                "课表里找不到科目「{Subject}」，已跳过第 {Lesson} 节。可用科目：{Available}",
-                command.ToSubject,
-                command.Lesson,
-                available);
-            failures.Add($"第{command.Lesson}节找不到科目「{command.ToSubject}」，已跳过");
-            return;
-        }
-
-        if (classInfo.SubjectId == target.Value.Key)
-        {
-            applied.Add($"第{command.Lesson}节本来就是{target.Value.Value.Name}（未变更）");
+            applied.Add($"{command.LessonLabel}本来就是{prepared.TargetSubjectName}（未变更）");
             return;
         }
 
@@ -143,13 +355,13 @@ public sealed class TempClassPlanPatcher(
             command.Lesson,
             classInfo.SubjectId,
             beforeName,
-            target.Value.Key,
-            target.Value.Value.Name,
+            prepared.TargetSubjectId,
+            prepared.TargetSubjectName,
             DateTime.Now));
 
-        classInfo.SubjectId = target.Value.Key;
+        classInfo.SubjectId = prepared.TargetSubjectId;
         classInfo.IsChangedClass = true;
-        applied.Add($"第{command.Lesson}节 {beforeName}→{target.Value.Value.Name}");
+        applied.Add($"{command.LessonLabel} {beforeName}→{prepared.TargetSubjectName}{prepared.MismatchNote}");
     }
 
     private void ApplySwap(
@@ -375,27 +587,5 @@ public sealed class TempClassPlanPatcher(
         }
 
         return true;
-    }
-
-    private static KeyValuePair<Guid, Subject>? FindSubject(Profile profile, string name)
-    {
-        var trimmed = name.Trim();
-        foreach (var pair in profile.Subjects)
-        {
-            if (string.Equals(pair.Value.Name?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
-            {
-                return pair;
-            }
-        }
-
-        foreach (var pair in profile.Subjects)
-        {
-            if (string.Equals(pair.Value.Initial?.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
-            {
-                return pair;
-            }
-        }
-
-        return null;
     }
 }

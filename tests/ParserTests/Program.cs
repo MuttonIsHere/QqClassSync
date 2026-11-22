@@ -63,6 +63,10 @@ internal static class Program
         _failed += AiResponseParserTests.Run();
 
         Console.WriteLine();
+        Console.WriteLine("=== 模糊识别与冲突兜底 ===");
+        _failed += FuzzyParsingTests.Run();
+
+        Console.WriteLine();
         Console.WriteLine("=== AI HTTP 调用（本地假服务器） ===");
         _failed += AiHttpIntegrationTests.Run();
 

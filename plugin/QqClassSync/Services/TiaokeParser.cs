@@ -16,19 +16,21 @@ public sealed class TiaokeParser
 
     // 节次：阿拉伯/中文数字
     private const string Num = @"[0-9零〇一二两三四五六七八九十百]{1,3}";
+    // 时段限定：上午/下午/中午/晚上（可省略）
+    private const string Part = @"(?:上午|下午|中午|晚上|早上)?";
     // 科目：不含空白与标点/数字，长度 1-8
     private const string Subject = @"[^\s，,。；;、:：!！?？0-9]{1,8}";
 
     private static readonly Regex SinglePattern = new(
-        $@"第\s*(?<lesson>{Num})\s*节\s*(?<from>{Subject})?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
+        $@"(?<part>{Part})\s*第\s*(?<lesson>{Num})\s*节\s*(?<from>{Subject})?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
         RegexOptions.Compiled);
 
     private static readonly Regex PairSamePattern = new(
-        $@"第\s*(?<a>{Num})\s*节\s*(?:和|与|跟|、)\s*第\s*(?<b>{Num})\s*节\s*(?:都|一起|全部|均)?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
+        $@"(?<part>{Part})\s*第\s*(?<a>{Num})\s*节\s*(?:和|与|跟|、)\s*第\s*(?<b>{Num})\s*节\s*(?:都|一起|全部|均)?\s*(?:改成|换成|改为|换为|调成|改|换)\s*(?<to>{Subject})",
         RegexOptions.Compiled);
 
     private static readonly Regex SwapPattern = new(
-        $@"第\s*(?<a>{Num})\s*节\s*(?:和|与|跟)\s*第\s*(?<b>{Num})\s*节\s*(?:互换|交换|对调)",
+        $@"(?<partA>{Part})\s*第\s*(?<a>{Num})\s*节\s*(?:和|与|跟)\s*(?<partB>{Part})\s*第\s*(?<b>{Num})\s*节\s*(?:互换|交换|对调)",
         RegexOptions.Compiled);
 
     // 撤销后的节次列表：第3,5节 / 第3、5节 / 第3节和第5节
@@ -100,6 +102,7 @@ public sealed class TiaokeParser
         var segments = payload.Split(['，', ',', '；', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries);
 
         var commands = new List<TiaokeCommand>();
+        string? unsupportedReason = null;
         foreach (var rawSegment in segments)
         {
             var segment = rawSegment.Trim();
@@ -115,8 +118,9 @@ public sealed class TiaokeParser
                 && ParseNumber(pairSame.Groups["b"].Value) is { } b1)
             {
                 var to = pairSame.Groups["to"].Value.Trim();
-                commands.Add(TiaokeCommand.Apply(a1, string.Empty, to, text.Trim()));
-                commands.Add(TiaokeCommand.Apply(b1, string.Empty, to, text.Trim()));
+                var part = pairSame.Groups["part"].Value.Trim();
+                commands.Add(TiaokeCommand.Apply(a1, string.Empty, to, text.Trim(), part));
+                commands.Add(TiaokeCommand.Apply(b1, string.Empty, to, text.Trim(), part));
                 continue;
             }
 
@@ -126,6 +130,16 @@ public sealed class TiaokeParser
                 && ParseNumber(swap.Groups["a"].Value) is { } a2
                 && ParseNumber(swap.Groups["b"].Value) is { } b2)
             {
+                // 「上午第3节和下午第5节互换」需要把两个时段分别换算，单独一次 Swap 表达不了；
+                // 宁可拒绝，也不要把全天第 3/5 节改错。
+                var partA = swap.Groups["partA"].Value.Trim();
+                var partB = swap.Groups["partB"].Value.Trim();
+                if (partA.Length > 0 || partB.Length > 0)
+                {
+                    unsupportedReason = "互换暂不支持「上午/下午」限定，请直接写全天第几节（如：#调课 第3节和第5节互换）";
+                    continue;
+                }
+
                 commands.Add(TiaokeCommand.Swap(a2, b2, text.Trim()));
                 continue;
             }
@@ -146,8 +160,13 @@ public sealed class TiaokeParser
                     continue;
                 }
 
-                commands.Add(TiaokeCommand.Apply(lesson, from, to, text.Trim()));
+                commands.Add(TiaokeCommand.Apply(lesson, from, to, text.Trim(), single.Groups["part"].Value.Trim()));
             }
+        }
+
+        if (unsupportedReason is not null)
+        {
+            return TiaokeParseResult.Fail(unsupportedReason);
         }
 
         if (commands.Count == 0)
