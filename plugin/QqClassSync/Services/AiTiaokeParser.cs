@@ -8,7 +8,8 @@ using QqClassSync.Models;
 namespace QqClassSync.Services;
 
 /// <summary>
-/// AI 模糊解析：把自然语言调课交给 OpenAI 兼容接口（默认 DeepSeek）/chat/completions。
+/// AI 模糊解析：把自然语言调课交给任意 OpenAI 兼容接口（DeepSeek / 智谱 GLM / 豆包 /
+/// Kimi / 通义千问等）的 /chat/completions。接口地址与模型名称都由设置页填写，代码不写死厂商。
 ///
 /// 隐私红线（务必保持）：
 ///   - 日志**不得**打印 QQ 消息原文，也不得打印模型返回原文；
@@ -22,7 +23,6 @@ namespace QqClassSync.Services;
 /// </summary>
 public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokeParser> logger)
 {
-    private const string Model = "deepseek-chat";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(1.5);
     private static readonly TimeSpan RateLimitCooldown = TimeSpan.FromSeconds(60);
@@ -84,9 +84,9 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
         输出：[]
         """;
 
-    /// <summary>AI 解析是否可用（开关 + Key + BaseUrl 三者齐全）。</summary>
+    /// <summary>AI 解析是否可用（开关 + Key + BaseUrl + Model 四者齐全）。</summary>
     public bool IsConfigured =>
-        AiParsePolicy.IsConfigured(settings.AiEnabled, settings.AiApiKey, settings.AiBaseUrl);
+        AiParsePolicy.IsConfigured(settings.AiEnabled, settings.AiApiKey, settings.AiBaseUrl, settings.AiModel);
 
     /// <summary>
     /// 尝试用 AI 解析。返回 null 表示「AI 不可用 / 无调课意图 / 调用失败 / 限流冷却」，调用方应回退正则解析。
@@ -95,6 +95,8 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
     {
         if (!IsConfigured)
         {
+            // 双保险：调用方通常已经判断过，这里再挡一次，保证「配置不全绝不出网」。
+            TiaokeLog.Info(logger, "[AI] 跳过：接口未配置");
             return null;
         }
 
@@ -120,11 +122,11 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(RequestTimeout);
 
-            var (content, rateLimited) = await RequestCompletionAsync(text, includeResponseFormat: true, cts.Token);
+            var (content, rateLimited, statusCode) = await RequestCompletionAsync(text, includeResponseFormat: true, cts.Token);
             if (content is null && !rateLimited)
             {
                 // 部分 OpenAI 兼容实现不支持 response_format，去掉该参数再试一次。
-                (content, rateLimited) = await RequestCompletionAsync(text, includeResponseFormat: false, cts.Token);
+                (content, rateLimited, statusCode) = await RequestCompletionAsync(text, includeResponseFormat: false, cts.Token);
             }
 
             if (rateLimited)
@@ -136,7 +138,16 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
 
             if (content is null)
             {
-                TiaokeLog.Warn(logger, "AI 调用失败（HTTP 错误）");
+                // 只记录状态码和归类，不打印响应体（可能包含厂商返回的敏感信息）。
+                var hint = statusCode switch
+                {
+                    401 or 403 => "鉴权失败，请检查 API Key 与厂商是否匹配",
+                    404 => "接口地址不存在，请检查 Base URL",
+                    400 => "请求被拒绝，请检查模型名称与参数",
+                    200 => "返回内容为空",
+                    _ => "HTTP 错误"
+                };
+                TiaokeLog.Warn(logger, "AI 调用失败（{Reason}，HTTP {Status}）", hint, statusCode);
                 return null;
             }
 
@@ -286,18 +297,29 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
         value.Length <= maxLength ? value : value[..maxLength] + "…";
 
     /// <summary>
-    /// 发一次 /chat/completions，返回 message.content；HTTP 非 2xx 时返回 (null, rateLimited)。
+    /// 拼出 /chat/completions 地址。用户填根路径即可；如果直接粘了完整地址也兼容。
     /// </summary>
-    private async Task<(string? Content, bool RateLimited)> RequestCompletionAsync(
+    private string BuildEndpoint()
+    {
+        var baseUrl = AiParsePolicy.NormalizeBaseUrl(settings.AiBaseUrl);
+        return baseUrl.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)
+            ? baseUrl
+            : $"{baseUrl}/chat/completions";
+    }
+
+    /// <summary>
+    /// 发一次 /chat/completions，返回 message.content；HTTP 非 2xx 时返回 (null, rateLimited, statusCode)。
+    /// </summary>
+    private async Task<(string? Content, bool RateLimited, int StatusCode)> RequestCompletionAsync(
         string text,
         bool includeResponseFormat,
         CancellationToken cancellationToken)
     {
-        var endpoint = $"{AiParsePolicy.NormalizeBaseUrl(settings.AiBaseUrl)}/chat/completions";
+        var endpoint = BuildEndpoint();
 
         var payload = new Dictionary<string, object?>
         {
-            ["model"] = Model,
+            ["model"] = settings.AiModel.Trim(),
             ["temperature"] = 0,
             ["max_tokens"] = 500,
             ["messages"] = new object[]
@@ -323,20 +345,20 @@ public sealed class AiTiaokeParser(TiaokeSettings settings, ILogger<AiTiaokePars
 
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
-            return (null, true);
+            return (null, true, (int)response.StatusCode);
         }
 
         if (response.StatusCode == HttpStatusCode.BadRequest && includeResponseFormat)
         {
-            return (null, false);
+            return (null, false, (int)response.StatusCode);
         }
 
         if (!response.IsSuccessStatusCode)
         {
-            return (null, false);
+            return (null, false, (int)response.StatusCode);
         }
 
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
-        return (AiResponseParser.ExtractMessageContent(body), false);
+        return (AiResponseParser.ExtractMessageContent(body), false, (int)response.StatusCode);
     }
 }

@@ -9,6 +9,7 @@
 
   "AiEnabled": false,
   "AiApiKey": "sk-xxxxxxxx",
-  "AiBaseUrl": "https://api.deepseek.com/v1",
+  "AiBaseUrl": "",
+  "AiModel": "",
   "AiConfirmBeforeSend": true
 }

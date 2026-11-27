@@ -56,20 +56,29 @@ public partial class TiaokeSettings : ObservableObject
         ["Tencent.QQNT", "com.tencent.qq", "com.tencent.tim", "QQ"];
 
     /// <summary>
-    /// 是否启用 AI 模糊解析（实验性）。默认关闭；关闭或 Key 为空时自动回退正则解析。
+    /// 是否启用 AI 模糊解析（实验性）。默认关闭；关闭或配置不全时自动回退正则解析。
     /// </summary>
     [ObservableProperty]
     private bool _aiEnabled;
 
     /// <summary>
-    /// DeepSeek API Key。默认空；只保存在本机 Settings.json，不会进入仓库。
+    /// AI 接口的 API Key（DeepSeek / 智谱 / 豆包 / Kimi / 通义等）。
+    /// 默认空；只保存在本机 Settings.json，不会进入仓库。
     /// </summary>
     [ObservableProperty]
     private string _aiApiKey = string.Empty;
 
-    /// <summary>AI 接口地址，默认 https://api.deepseek.com/v1。</summary>
+    /// <summary>
+    /// AI 接口地址（OpenAI 兼容）。默认空：留空就是留空，不再自动填 DeepSeek。
+    /// </summary>
     [ObservableProperty]
-    private string _aiBaseUrl = AiParsePolicy.DefaultBaseUrl;
+    private string _aiBaseUrl = string.Empty;
+
+    /// <summary>
+    /// 模型名称（如 deepseek-chat / glm-4 / 豆包模型 ID）。默认空，由用户按服务商填写。
+    /// </summary>
+    [ObservableProperty]
+    private string _aiModel = string.Empty;
 
     /// <summary>AI 解析出的结果是否要先确认再执行（默认开启，隐私/误判保护）。</summary>
     [ObservableProperty]
@@ -102,9 +111,11 @@ public partial class TiaokeSettings : ObservableObject
         {
             if (File.Exists(path))
             {
-                var loaded = JsonSerializer.Deserialize<TiaokeSettings>(File.ReadAllText(path), JsonOptions);
+                var json = File.ReadAllText(path);
+                var loaded = JsonSerializer.Deserialize<TiaokeSettings>(json, JsonOptions);
                 if (loaded is not null)
                 {
+                    ApplyLegacyModelMigration(json, loaded);
                     settings = loaded;
                 }
             }
@@ -139,12 +150,14 @@ public partial class TiaokeSettings : ObservableObject
                 return;
             }
 
-            var loaded = JsonSerializer.Deserialize<TiaokeSettings>(File.ReadAllText(FilePath), JsonOptions);
+            var json = File.ReadAllText(FilePath);
+            var loaded = JsonSerializer.Deserialize<TiaokeSettings>(json, JsonOptions);
             if (loaded is null)
             {
                 return;
             }
 
+            ApplyLegacyModelMigration(json, loaded);
             loaded.Normalize();
             CopyFrom(loaded);
             _lastLoadedWriteTimeUtc = info.LastWriteTimeUtc;
@@ -169,7 +182,42 @@ public partial class TiaokeSettings : ObservableObject
         AiEnabled = other.AiEnabled;
         AiApiKey = other.AiApiKey;
         AiBaseUrl = other.AiBaseUrl;
+        AiModel = other.AiModel;
         AiConfirmBeforeSend = other.AiConfirmBeforeSend;
+    }
+
+    /// <summary>
+    /// 旧版本没有 AiModel 字段：只有 Base URL 仍指向 DeepSeek 时才补 deepseek-chat，
+    /// 保证升级后原来的 DeepSeek 配置不失效；其它厂商或空地址一律保持空值，不猜。
+    /// </summary>
+    private static void ApplyLegacyModelMigration(string json, TiaokeSettings settings)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            // 手改配置可能用 camelCase，这里大小写不敏感地判断字段是否存在。
+            var hasModelField = document.RootElement
+                .EnumerateObject()
+                .Any(property => string.Equals(property.Name, nameof(AiModel), StringComparison.OrdinalIgnoreCase));
+            if (hasModelField)
+            {
+                return;
+            }
+
+            if ((settings.AiBaseUrl ?? string.Empty).Contains("deepseek.com", StringComparison.OrdinalIgnoreCase))
+            {
+                settings.AiModel = AiParsePolicy.LegacyDeepSeekModel;
+            }
+        }
+        catch
+        {
+            // 迁移失败不影响加载；保持空值，由用户手动填写。
+        }
     }
 
     public void Normalize()
@@ -181,9 +229,10 @@ public partial class TiaokeSettings : ObservableObject
 
         ScanIntervalSeconds = Math.Clamp(ScanIntervalSeconds, 0.3, 10);
 
-        // AI 配置：Key 去掉首尾空白；Base URL 去尾斜杠，空值回落默认。
+        // AI 配置：只去首尾空白/末尾斜杠。空值保持为空，不回填默认地址或默认模型。
         AiApiKey = (AiApiKey ?? string.Empty).Trim();
         AiBaseUrl = AiParsePolicy.NormalizeBaseUrl(AiBaseUrl);
+        AiModel = AiParsePolicy.NormalizeModel(AiModel);
     }
 
     public void Save()

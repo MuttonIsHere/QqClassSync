@@ -95,9 +95,26 @@
                 AI 模糊解析（实验性）
             </TextBlock>
 
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE8B7;}"
+                                       Header="服务商预设"
+                                       Description="选择后自动填入 Base URL 与推荐模型；选「自定义」会清空这两项，不会自动补默认地址">
+                <controls:SettingsExpander.Footer>
+                    <ComboBox x:Name="ProviderPresetBox"
+                              Width="240"
+                              HorizontalAlignment="Right"
+                              SelectionChanged="OnProviderPresetChanged">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Name}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
             <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE99A;}"
                                        Header="启用 AI 解析"
-                                       Description="把自然语言调课交给大模型解析；未填 Key 时自动回退正则解析">
+                                       Description="把自然语言调课交给大模型解析；Key / 地址 / 模型缺任意一项都会自动回退正则">
                 <controls:SettingsExpander.Footer>
                     <ToggleSwitch IsChecked="{Binding AiEnabled, Mode=TwoWay}" />
                 </controls:SettingsExpander.Footer>
@@ -113,7 +130,7 @@
 
             <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE72E;}"
                                        Header="API Key"
-                                       Description="只保存在本机 Settings.json；留空则完全走正则解析，不会报错">
+                                       Description="只保存在本机 Settings.json；留空则 AI 停用并回退正则，不会报错">
                 <controls:SettingsExpander.Footer>
                     <TextBox Text="{Binding AiApiKey, Mode=TwoWay}"
                              PasswordChar="●"
@@ -125,13 +142,38 @@
 
             <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE774;}"
                                        Header="API Base URL"
-                                       Description="默认 https://api.deepseek.com/v1">
+                                       Description="OpenAI 兼容接口根路径，如 https://open.bigmodel.cn/api/paas/v4；留空就保持为空，不会自动填默认地址">
                 <controls:SettingsExpander.Footer>
                     <TextBox Text="{Binding AiBaseUrl, Mode=TwoWay}"
                              Width="320"
-                             HorizontalAlignment="Right" />
+                             HorizontalAlignment="Right"
+                             Watermark="https://…/v1" />
                 </controls:SettingsExpander.Footer>
             </controls:SettingsExpander>
+
+            <controls:SettingsExpander IconSource="{ci:FluentIconSource Glyph=&#xE8A5;}"
+                                       Header="模型名称 (Model)"
+                                       Description="填服务商文档里的模型 ID，如 deepseek-chat、glm-4、豆包接入点 ID；任何预设下都可手动编辑，留空则 AI 停用">
+                <controls:SettingsExpander.Footer>
+                    <TextBox Text="{Binding AiModel, Mode=TwoWay}"
+                             Width="240"
+                             HorizontalAlignment="Right"
+                             Watermark="glm-4 / deepseek-chat" />
+                </controls:SettingsExpander.Footer>
+            </controls:SettingsExpander>
+
+            <TextBlock FontSize="12"
+                       Margin="4,0,0,4"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}">
+                兼容 OpenAI 接口格式：DeepSeek、智谱 GLM、豆包（火山方舟）、Kimi、通义千问等都可以填。
+            </TextBlock>
+            <TextBlock FontSize="12"
+                       Margin="4,0,0,8"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextFillColorTertiaryBrush}">
+                Base URL 填服务商根路径（不要带 /chat/completions），模型名称填该服务商文档里的模型 ID。
+            </TextBlock>
 
             <TextBlock x:Name="AiStatusText"
                        FontSize="12"

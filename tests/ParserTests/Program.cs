@@ -67,6 +67,14 @@ internal static class Program
         _failed += FuzzyParsingTests.Run();
 
         Console.WriteLine();
+        Console.WriteLine("=== AI 服务商预设 ===");
+        _failed += AiProviderPresetTests.Run();
+
+        Console.WriteLine();
+        Console.WriteLine("=== 设置持久化（清空不回落） ===");
+        _failed += SettingsTests.Run();
+
+        Console.WriteLine();
         Console.WriteLine("=== AI HTTP 调用（本地假服务器） ===");
         _failed += AiHttpIntegrationTests.Run();
 

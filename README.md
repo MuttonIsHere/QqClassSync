@@ -125,7 +125,7 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 - `AllowedAppNames` / `AllowedAppIds`：通知来源白名单，联调时可加入测试应用。
 - **群聊 / 私聊 / 系统消息都能收**：插件只判断「是不是 QQ 的 Toast」和「文本里有没有关键词」，不区分聊天类型。
 
-## 🔐 AI 解析配置与密钥安全（v1.2.0）
+## 🔐 AI 解析配置与密钥安全（v1.2.0 起；v1.7.0 内置服务商预设）
 
 设置页新增「AI 模糊解析（实验性）」区块：
 
@@ -136,17 +136,43 @@ Copy-Item .\bin\Release\net8.0-windows10.0.19041.0\* `
 | 启用 AI 解析 | **关** | 关着就完全走正则，不碰网络 |
 | 发送前确认 | **开** | AI 解析结果只提醒、不直接执行 |
 | API Key | **空** | 只存本机 `Settings.json`；留空自动回退正则 |
-| API Base URL | `https://api.deepseek.com/v1` | 可改成任意 OpenAI 兼容接口 |
+| API Base URL | **空** | 服务商根路径；**留空就保持为空，不会自动填 DeepSeek** |
+| 模型名称 (Model) | **空** | 服务商文档里的模型 ID，如 `glm-4`、`deepseek-chat`；留空则停用 AI |
+
+**兼容任意 OpenAI 接口格式的厂商**（填根路径，不要带 `/chat/completions`）：
+
+| 厂商 | API Base URL | 模型示例 |
+|---|---|---|
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4` |
+| 豆包（火山方舟） | `https://ark.cn-beijing.volces.com/api/v3` | 控制台的接入点 ID（`ep-…`） |
+| Kimi | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+
+**内置服务商预设**
+
+设置页 AI 区域顶部有「服务商预设」下拉，包含：
+
+DeepSeek / 智谱 GLM / Kimi (Moonshot) / 通义千问 / 豆包（火山方舟）/ OpenAI / 硅基流动 SiliconFlow / OpenRouter / **自定义 (Custom)**
+
+- 选中预设 → 自动填入 Base URL 与推荐模型
+- 当前输入和预设不一致（且已填过内容）→ 弹窗确认「覆盖 / 保留当前」
+- 选「自定义」→ 清空 Base URL 与模型名称，由用户自己填，不会自动补默认地址
+- 模型名称输入框在任何预设下都可编辑，方便填特定版本 ID
+- 豆包没有通用模型名：预设只填 Base URL，模型保留当前值，需填控制台的接入点 ID（`ep-…`）
 
 **「留空不崩」是怎么保证的**
 
-- AI 是否可用由 `AiParsePolicy.IsConfigured(开关, Key, BaseUrl)` 三重判定，任一不满足即 `false`
+- AI 是否可用由 `AiParsePolicy.IsConfigured(开关, Key, BaseUrl, Model)` 四重判定，任一不满足即 `false`
 - 解析路由：**先正则**（命中就结束，快、免费、离线）→ 未命中且 AI 可用才尝试 AI → AI 不可用/异常一律返回 `null` 并静默回退
-- 启动日志可核对：`AI 解析：未启用或未填写 Key，使用正则解析（不会报错）`
+- 接口地址或模型为空时，日志会写：`[AI] 跳过：接口未配置`（同一段未配置期只记一次，修好后自动复位）
+- 启动日志可核对：`AI 解析：未启用 / 未填写 API Key / API Base URL 为空 / 模型名称为空 …`
 
 **调用细节（v1.2.0 起真正联网）**
 
-- `POST {BaseUrl}/chat/completions`，`model: deepseek-chat`，`temperature: 0`，强制 JSON 输出
+- `POST {BaseUrl}/chat/completions`，`model` 取设置页填写的模型名称，`temperature: 0`，强制 JSON 输出
+- v1.6.0 起接口地址与模型名称不再写死：可接 DeepSeek / 智谱 GLM / 豆包 / Kimi / 通义千问等任意 OpenAI 兼容服务
+- 如果 Base URL 直接粘了完整 `/chat/completions` 地址，也会识别，不会重复拼接
 - **8 秒超时**；超时 / 网络错误 / HTTP 非 2xx / 返回格式不对 → 一律返回 `null`，静默回退正则
 - **意图预筛**：只有像调课的消息（含「调课/换课/代课/不上/来上/换成…」）才会送进大模型，闲聊不消耗 token
 - **发送前确认**（默认开）：AI 解析出结果先弹「检测到 AI 解析调课：第3节 →数学，是否应用？」，在 QQ 里回 `#确认` 应用、`#放弃` 取消（10 分钟有效）

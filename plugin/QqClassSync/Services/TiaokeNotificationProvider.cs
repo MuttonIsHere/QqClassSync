@@ -39,6 +39,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
     private IReadOnlyList<TiaokeCommand>? _pendingCommands;
     private DateTime _pendingExpiresAt;
     private string _pendingSource = "QQ";
+    private bool _aiUnconfiguredLogged;
 
     /// <summary>其它插件（如「小橙看班联动」）转发进来的消息队列。</summary>
     private readonly ConcurrentQueue<(string Text, string Source)> _externalInbox = new();
@@ -77,9 +78,7 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         TiaokeLog.Info(_logger, "今天生效的课表：{Plan}", patcher.DescribeTodayPlan());
         TiaokeLog.Info(_logger, 
             "AI 解析：{Status}",
-            _aiParser.IsConfigured
-                ? "已配置（调用 /chat/completions，8 秒超时，失败自动回退正则）"
-                : "未启用或未填写 Key，使用正则解析（不会报错）");
+            AiParsePolicy.DescribeStatus(settings.AiEnabled, settings.AiApiKey, settings.AiBaseUrl, settings.AiModel));
     }
 
     Task IHostedService.StartAsync(CancellationToken cancellationToken)
@@ -246,7 +245,21 @@ public sealed class TiaokeNotificationProvider : NotificationProviderBase, IHost
         //   - 命中关键词/撤销词 → 走正则（快、免费）；
         //   - AI 已配置且消息像调课意图（如「今天第三节课不上了，让数学老师来上」）→ 允许进入 AI。
         var mentionsCommand = _parser.MentionsCommand(text, _settings.Keyword);
-        var aiCandidate = _aiParser.IsConfigured && AiParsePolicy.LooksLikeIntent(text);
+        var looksLikeIntent = AiParsePolicy.LooksLikeIntent(text);
+        var aiReady = _aiParser.IsConfigured;
+
+        if (looksLikeIntent && !aiReady && _settings.AiEnabled && !_aiUnconfiguredLogged)
+        {
+            // 只记一次，避免同一段未配置期内每条消息都刷屏；配置修好后会自动复位。
+            _aiUnconfiguredLogged = true;
+            TiaokeLog.Info(_logger, "[AI] 跳过：接口未配置");
+        }
+        else if (aiReady)
+        {
+            _aiUnconfiguredLogged = false;
+        }
+
+        var aiCandidate = aiReady && looksLikeIntent;
         if (!mentionsCommand && !aiCandidate)
         {
             return;

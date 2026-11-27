@@ -26,7 +26,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("第3节换成数学，第5节换成物理", CancellationToken.None)
@@ -54,7 +55,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("今天第三节课不上了，让数学老师来上", CancellationToken.None)
@@ -70,7 +72,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("今天作业好多", CancellationToken.None).GetAwaiter().GetResult();
@@ -84,7 +87,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("随便说说", CancellationToken.None).GetAwaiter().GetResult();
@@ -99,7 +103,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
 
@@ -119,7 +124,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("第三节换一下吧", CancellationToken.None).GetAwaiter().GetResult();
@@ -138,7 +144,8 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("下午第二节改数学", CancellationToken.None).GetAwaiter().GetResult();
@@ -158,13 +165,95 @@ internal static class AiHttpIntegrationTests
             {
                 AiEnabled = true,
                 AiApiKey = "sk-test-key",
-                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1"
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = "deepseek-chat"
             };
             var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
             var result = parser.TryParseAsync("下午第3节和第5节互换", CancellationToken.None).GetAwaiter().GetResult();
             failed += Check(
                 result is { Success: false } && result.Reason.Contains("互换暂不支持"),
                 "带时段的互换 → 明确失败并说明原因");
+        }
+
+        // 9) 自定义厂商：智谱风格根路径 + glm-4 → 请求路径与模型都按设置走
+        using (var server = new MockServer(OkResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-zhipu-test",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/api/paas/v4",
+                AiModel = "glm-4"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("下午第二节语文改数学", CancellationToken.None).GetAwaiter().GetResult();
+
+            failed += Check(result is { Success: true }, "自定义厂商地址也能调通");
+            failed += Check(server.LastPath == "/api/paas/v4/chat/completions", "请求打到自定义 Base URL 的 /chat/completions");
+            failed += Check(server.LastBody.Contains("\"glm-4\""), "请求体使用设置里的模型名 glm-4");
+            failed += Check(!server.LastBody.Contains("deepseek-chat"), "请求体不再出现写死的 deepseek-chat");
+        }
+
+        // 10) 用户把完整地址粘进 Base URL → 不重复拼 /chat/completions
+        using (var server = new MockServer(OkResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1/chat/completions",
+                AiModel = "glm-4"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            _ = parser.TryParseAsync("第3节换成数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(server.LastPath == "/v1/chat/completions", "完整地址不重复拼接路径");
+        }
+
+        // 11) Base URL 为空 → 一个请求都不发
+        using (var server = new MockServer(OkResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = "",
+                AiModel = "glm-4"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("第3节换成数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(result is null, "空 Base URL → 返回 null（回退正则）");
+            failed += Check(server.RequestCount == 0, "空 Base URL → 一个请求都不发");
+        }
+
+        // 12) 模型名称为空 → 一个请求都不发
+        using (var server = new MockServer(OkResponse, 200))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-test-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/v1",
+                AiModel = ""
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("第3节换成数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(result is null, "空模型名 → 返回 null（回退正则）");
+            failed += Check(server.RequestCount == 0, "空模型名 → 一个请求都不发");
+        }
+
+        // 13) 鉴权失败（401）→ 静默回退，不抛异常
+        using (var server = new MockServer("{\"error\":{\"message\":\"invalid api key\"}}", 401))
+        {
+            var settings = new TiaokeSettings
+            {
+                AiEnabled = true,
+                AiApiKey = "sk-wrong-key",
+                AiBaseUrl = $"http://127.0.0.1:{server.Port}/api/paas/v4",
+                AiModel = "glm-4"
+            };
+            var parser = new AiTiaokeParser(settings, NullLogger<AiTiaokeParser>.Instance);
+            var result = parser.TryParseAsync("第3节换成数学", CancellationToken.None).GetAwaiter().GetResult();
+            failed += Check(result is null, "HTTP 401 → 返回 null（回退正则，不抛异常）");
         }
 
         return failed;

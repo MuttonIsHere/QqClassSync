@@ -1,9 +1,12 @@
 using System.ComponentModel;
+using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Threading;
 using ClassIsland.Core.Abstractions.Controls;
 using ClassIsland.Core.Attributes;
 using ClassIsland.Shared;
+using FluentAvalonia.UI.Controls;
 using QqClassSync.Services;
 
 namespace QqClassSync.Views;
@@ -17,6 +20,8 @@ public partial class TiaokeSettingsPage : SettingsPageBase
 {
     private readonly TiaokeSettings _settings;
     private DispatcherTimer? _saveTimer;
+    private bool _suppressPresetChange;
+    private AiProviderPreset? _lastPresetSelection;
 
     public TiaokeSettingsPage()
     {
@@ -27,6 +32,10 @@ public partial class TiaokeSettingsPage : SettingsPageBase
         // 页面可能被重复创建，先退订再订阅，保证只挂一次。
         _settings.PropertyChanged -= OnSettingsPropertyChanged;
         _settings.PropertyChanged += OnSettingsPropertyChanged;
+
+        ProviderPresetBox.ItemsSource = AiProviderPresets.All;
+        SyncPresetSelection();
+
         RefreshPlanStatus();
         RefreshAiStatus();
     }
@@ -46,10 +55,18 @@ public partial class TiaokeSettingsPage : SettingsPageBase
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // 手动改地址/模型时，下拉菜单跟着切换到对应预设或「自定义」（只切显示，不改输入）。
+        if (!_suppressPresetChange
+            && e.PropertyName is nameof(TiaokeSettings.AiBaseUrl) or nameof(TiaokeSettings.AiModel))
+        {
+            SyncPresetSelection();
+        }
+
         // AI 相关配置改动时实时刷新状态文案（不会显示 Key 明文）。
         if (e.PropertyName is nameof(TiaokeSettings.AiEnabled)
             or nameof(TiaokeSettings.AiApiKey)
             or nameof(TiaokeSettings.AiBaseUrl)
+            or nameof(TiaokeSettings.AiModel)
             or nameof(TiaokeSettings.AiConfirmBeforeSend))
         {
             RefreshAiStatus();
@@ -59,6 +76,99 @@ public partial class TiaokeSettingsPage : SettingsPageBase
         _saveTimer.Stop();
         _saveTimer.Start();
     }
+
+    /// <summary>按当前 Base URL 识别预设；识别不到就显示「自定义」，但绝不清空已有输入。</summary>
+    private void SyncPresetSelection()
+    {
+        var match = AiProviderPresets.Match(_settings.AiBaseUrl) ?? AiProviderPresets.Custom;
+        _lastPresetSelection = match;
+
+        _suppressPresetChange = true;
+        ProviderPresetBox.SelectedItem = match;
+        _suppressPresetChange = false;
+    }
+
+    /// <summary>
+    /// 用户主动选择预设：需要覆盖已手改的配置时先确认；选「自定义」则按约定清空两项。
+    /// </summary>
+    private async void OnProviderPresetChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressPresetChange)
+        {
+            return;
+        }
+
+        if (ProviderPresetBox.SelectedItem is not AiProviderPreset preset)
+        {
+            return;
+        }
+
+        try
+        {
+            if (preset.IsCustom)
+            {
+                ApplyPreset(preset);
+                _lastPresetSelection = preset;
+                return;
+            }
+
+            if (AiProviderPresets.NeedsOverwriteConfirmation(preset, _settings.AiBaseUrl, _settings.AiModel))
+            {
+                var overwrite = await ConfirmOverwriteAsync(preset);
+                if (!overwrite)
+                {
+                    // 保留当前输入，下拉菜单退回上一次的选择。
+                    _suppressPresetChange = true;
+                    ProviderPresetBox.SelectedItem = _lastPresetSelection ?? AiProviderPresets.Custom;
+                    _suppressPresetChange = false;
+                    return;
+                }
+            }
+
+            ApplyPreset(preset);
+            _lastPresetSelection = preset;
+        }
+        catch (Exception ex)
+        {
+            // 对话框/绑定异常不能让设置页崩溃；保留原配置。
+            AiStatusText.Text = "切换服务商预设失败：" + ex.GetType().Name;
+            _suppressPresetChange = true;
+            ProviderPresetBox.SelectedItem = _lastPresetSelection ?? AiProviderPresets.Custom;
+            _suppressPresetChange = false;
+        }
+    }
+
+    private void ApplyPreset(AiProviderPreset preset)
+    {
+        var (baseUrl, model) = AiProviderPresets.ResolveApply(preset, _settings.AiModel);
+        _settings.AiBaseUrl = baseUrl;
+        _settings.AiModel = model;
+        RefreshAiStatus();
+    }
+
+    private async Task<bool> ConfirmOverwriteAsync(AiProviderPreset preset)
+    {
+        var current = $"当前：{Display(_settings.AiBaseUrl)} / {Display(_settings.AiModel)}";
+        var presetModel = string.IsNullOrWhiteSpace(preset.Model) ? "(保留当前模型)" : Display(preset.Model);
+        var target = $"预设：{Display(preset.BaseUrl)} / {presetModel}";
+        var dialog = new ContentDialog
+        {
+            Title = $"用「{preset.Name}」覆盖当前配置？",
+            Content = new TextBlock
+            {
+                Text = $"{current}\n{target}\n\n覆盖后仍可手动修改模型名称。",
+                TextWrapping = TextWrapping.Wrap
+            },
+            PrimaryButtonText = "覆盖",
+            CloseButtonText = "保留当前",
+            DefaultButton = ContentDialogButton.Primary
+        };
+
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
+    private static string Display(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "(空)" : value.Trim();
 
     private DispatcherTimer CreateSaveTimer()
     {
@@ -82,6 +192,7 @@ public partial class TiaokeSettingsPage : SettingsPageBase
     protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
+        SyncPresetSelection();
         RefreshPlanStatus();
         RefreshAiStatus();
     }
@@ -150,7 +261,8 @@ public partial class TiaokeSettingsPage : SettingsPageBase
             AiStatusText.Text = AiParsePolicy.DescribeStatus(
                 _settings.AiEnabled,
                 _settings.AiApiKey,
-                _settings.AiBaseUrl);
+                _settings.AiBaseUrl,
+                _settings.AiModel);
         }
         catch
         {

@@ -1,14 +1,20 @@
 namespace QqClassSync.Services;
 
 /// <summary>
-/// AI 解析的「是否可用」判定。抽成纯函数是为了能脱离插件宿主做单元测试，
-/// 也避免各处重复写「开关 + Key + BaseUrl」的三重判断。
+/// AI 解析的「是否可用」判定与配置规整。抽成纯函数是为了能脱离插件宿主做单元测试，
+/// 也避免各处重复写「开关 + Key + BaseUrl + Model」的四重判断。
 ///
-/// 红线：配置不完整时只返回 false，调用方必须静默回退到正则解析，不允许抛异常。
+/// 红线：
+///   - 配置不完整时只返回 false，调用方必须静默回退到正则解析，不允许抛异常；
+///   - 空值就是空值：Base URL / 模型名称留空时**不再回填默认值**，由用户决定接哪个厂商。
 /// </summary>
 public static class AiParsePolicy
 {
+    /// <summary>仅用于界面提示与旧配置迁移，不再作为空值的兜底。</summary>
     public const string DefaultBaseUrl = "https://api.deepseek.com/v1";
+
+    /// <summary>旧版本没有模型字段时的迁移值（只在 Base URL 指向 DeepSeek 时使用）。</summary>
+    public const string LegacyDeepSeekModel = "deepseek-chat";
 
     /// <summary>
     /// 便宜的「意图预筛」：只有像调课的消息才值得送进大模型，避免把整群闲聊都发出去。
@@ -27,17 +33,27 @@ public static class AiParsePolicy
         && IntentHints.Any(hint => text.Contains(hint, StringComparison.Ordinal));
 
     /// <summary>
-    /// 只有「开关打开 + API Key 非空 + BaseUrl 非空」三者同时满足，才认为 AI 解析可用。
+    /// 只有「开关打开 + API Key 非空 + Base URL 是有效 http(s) 地址 + 模型名称非空」四者同时满足，
+    /// 才认为 AI 解析可用。
     /// </summary>
-    public static bool IsConfigured(bool enabled, string? apiKey, string? baseUrl) =>
+    public static bool IsConfigured(bool enabled, string? apiKey, string? baseUrl, string? model) =>
         enabled
         && !string.IsNullOrWhiteSpace(apiKey)
-        && !string.IsNullOrWhiteSpace(baseUrl);
+        && IsHttpUrl(baseUrl)
+        && !string.IsNullOrWhiteSpace(model);
+
+    /// <summary>Base URL 必须是完整的 http/https 地址，避免拿相对路径去发请求。</summary>
+    public static bool IsHttpUrl(string? baseUrl)
+    {
+        var normalized = NormalizeBaseUrl(baseUrl);
+        return Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+               && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+    }
 
     /// <summary>
     /// 给设置页显示的状态文案（不会暴露 Key 内容）。
     /// </summary>
-    public static string DescribeStatus(bool enabled, string? apiKey, string? baseUrl)
+    public static string DescribeStatus(bool enabled, string? apiKey, string? baseUrl, string? model)
     {
         if (!enabled)
         {
@@ -46,15 +62,25 @@ public static class AiParsePolicy
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return "已开启但未填写 API Key：自动回退到正则解析，不会报错";
+            return "未填写 API Key：AI 解析已停用，自动回退正则（不会报错）";
         }
 
         if (string.IsNullOrWhiteSpace(baseUrl))
         {
-            return "Base URL 为空：自动回退到正则解析，不会报错";
+            return "API Base URL 为空：AI 解析已停用，自动回退正则（填上服务商地址即可启用）";
         }
 
-        return $"已配置（{MaskKey(apiKey)}）：调用 /chat/completions，8 秒超时，失败自动回退正则";
+        if (!IsHttpUrl(baseUrl))
+        {
+            return "API Base URL 格式无效：需要以 http:// 或 https:// 开头的完整地址";
+        }
+
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return "模型名称为空：AI 解析已停用，自动回退正则（例如 glm-4、deepseek-chat）";
+        }
+
+        return $"已配置（模型 {model.Trim()} / {MaskKey(apiKey)}）：调用 /chat/completions，失败自动回退正则";
     }
 
     /// <summary>
@@ -77,15 +103,12 @@ public static class AiParsePolicy
     }
 
     /// <summary>
-    /// 规整 Base URL：去掉末尾斜杠；为空时回落到默认值。
+    /// 规整 Base URL：去掉首尾空白与末尾斜杠。**空值保持为空**，不再回落默认地址。
     /// </summary>
-    public static string NormalizeBaseUrl(string? baseUrl)
-    {
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            return DefaultBaseUrl;
-        }
+    public static string NormalizeBaseUrl(string? baseUrl) =>
+        string.IsNullOrWhiteSpace(baseUrl) ? string.Empty : baseUrl.Trim().TrimEnd('/');
 
-        return baseUrl.Trim().TrimEnd('/');
-    }
+    /// <summary>规整模型名称：去掉首尾空白。**空值保持为空**。</summary>
+    public static string NormalizeModel(string? model) =>
+        string.IsNullOrWhiteSpace(model) ? string.Empty : model.Trim();
 }
